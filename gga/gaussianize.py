@@ -101,6 +101,43 @@ def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen):
 
 
 # --------------------------------------------------------------------------- #
+# 1.2b  attribute-conditional rank transport
+# --------------------------------------------------------------------------- #
+def conditional_rank_transport_step(z, cond, *, k, n_dirs, alpha, gen):
+    """Same primitive as greedy_rank_transport_step, but the subset is a
+    k-nearest-neighborhood in a binary attribute space (Hamming distance)
+    around one randomly sampled real particle's condition vector, and the
+    rank transport is applied to *just that k-subset* (not propagated to the
+    full population). Interleaved with global steps, this additionally
+    Gaussianizes each attribute-similar neighborhood on its own terms, so a
+    downstream conditional generator sees a well-behaved z | condition.
+    """
+    N, d = z.shape
+    qi = int(torch.randint(N, (1,), device=z.device, generator=gen))
+    dist = (cond != cond[qi:qi + 1]).sum(1)              # Hamming distance, (N,)
+    k = min(k, N)
+    idx = torch.topk(dist, k, largest=False).indices
+    zs = z[idx]
+
+    dirs = _rand_unit(n_dirs, d, z.device, z.dtype)
+    proj = zs @ dirs.T
+    s, _ = torch.sort(proj, dim=0)
+    q = _gaussian_quantiles(k, z.device, z.dtype).unsqueeze(1)
+    scores = ((s - q) ** 2).mean(0)
+    best = int(torch.argmax(scores))
+    a = dirs[best]
+
+    proj_sub = zs @ a
+    order = torch.argsort(proj_sub)
+    q_sub = _gaussian_quantiles(k, z.device, z.dtype)
+    target = torch.empty_like(proj_sub)
+    target[order] = q_sub
+    zs = zs + alpha * (target - proj_sub).unsqueeze(1) * a.unsqueeze(0)
+    z[idx] = zs
+    return float(scores[best])
+
+
+# --------------------------------------------------------------------------- #
 # 1.3  conditional offset-slab cleanup
 # --------------------------------------------------------------------------- #
 def offset_slab_cleanup_step(z, *, search_subset, n_slabs, eps, alpha, gen):

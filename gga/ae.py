@@ -113,22 +113,32 @@ class ResidualUpBlock(nn.Module):
 
 
 class ResidualEncoder(nn.Module):
-    """32x32x3 -> latent_dim using bottleneck-preserving residual blocks."""
+    """image_size x image_size x3 -> latent_dim, bottleneck-preserving residual blocks.
 
-    def __init__(self, latent_dim: int, ch: int = 64):
+    Downsamples by stride-2 blocks until the spatial size reaches 4x4, so the
+    same head shape (ch*4 channels @ 4x4) works for any image_size that is a
+    power of two >= 8 -- image_size=32 (3 blocks) reproduces the original CIFAR
+    architecture exactly; image_size=64 adds one more block.
+    """
+
+    def __init__(self, latent_dim: int, ch: int = 64, image_size: int = 32):
         super().__init__()
+        n_down = (image_size // 4).bit_length() - 1
+        if 4 << n_down != image_size:
+            raise ValueError(f"image_size must be a power of two >= 8, got {image_size}")
+        out_ch = [ch * 2 ** min(i, 2) for i in range(n_down)]
+        in_ch = [ch] + out_ch[:-1]
+
         self.stem = nn.Sequential(
             nn.Conv2d(3, ch, 3, 1, 1, bias=False),
             nn.BatchNorm2d(ch),
             nn.SiLU(),
         )
         self.net = nn.Sequential(
-            ResidualDownBlock(ch, ch),                    # 16x16
-            ResidualDownBlock(ch, ch * 2),                # 8x8
-            ResidualDownBlock(ch * 2, ch * 4),            # 4x4
-            ResidualBlock(ch * 4),
+            *(ResidualDownBlock(i, o) for i, o in zip(in_ch, out_ch)),
+            ResidualBlock(out_ch[-1]),
         )
-        self.head = nn.Linear(ch * 4 * 4 * 4, latent_dim)
+        self.head = nn.Linear(out_ch[-1] * 4 * 4, latent_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.net(self.stem(x))
@@ -136,22 +146,29 @@ class ResidualEncoder(nn.Module):
 
 
 class ResidualDecoder(nn.Module):
-    """latent_dim -> 32x32x3 using residual resize-convolution blocks."""
+    """latent_dim -> image_size x image_size x3, mirrors ResidualEncoder."""
 
-    def __init__(self, latent_dim: int, ch: int = 64):
+    def __init__(self, latent_dim: int, ch: int = 64, image_size: int = 32):
         super().__init__()
+        n_down = (image_size // 4).bit_length() - 1
+        if 4 << n_down != image_size:
+            raise ValueError(f"image_size must be a power of two >= 8, got {image_size}")
+        enc_out_ch = [ch * 2 ** min(i, 2) for i in range(n_down)]
+        bottleneck_ch = enc_out_ch[-1]
+        dec_out_ch = list(reversed(enc_out_ch[:-1])) + [ch]
+        dec_in_ch = [bottleneck_ch] + dec_out_ch[:-1]
+
         self.ch = ch
-        self.fc = nn.Linear(latent_dim, ch * 4 * 4 * 4)
-        self.pre = ResidualBlock(ch * 4)
+        self.bottleneck_ch = bottleneck_ch
+        self.fc = nn.Linear(latent_dim, bottleneck_ch * 4 * 4)
+        self.pre = ResidualBlock(bottleneck_ch)
         self.net = nn.Sequential(
-            ResidualUpBlock(ch * 4, ch * 2),              # 8x8
-            ResidualUpBlock(ch * 2, ch),                  # 16x16
-            ResidualUpBlock(ch, ch),                      # 32x32
+            *(ResidualUpBlock(i, o) for i, o in zip(dec_in_ch, dec_out_ch)),
             nn.Conv2d(ch, 3, 3, 1, 1),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc(z).view(-1, self.ch * 4, 4, 4)
+        h = self.fc(z).view(-1, self.bottleneck_ch, 4, 4)
         return torch.tanh(self.net(self.pre(h)))
 
 
@@ -203,18 +220,28 @@ class SpatialResidualUpBlock(nn.Module):
 
 
 class SpatialResidualEncoder(nn.Module):
-    """CIFAR encoder whose flat code retains a 4x4 spatial organization."""
+    """image_size x image_size encoder whose flat code retains a 4x4 spatial
+    organization. The stem does one stride-2 halving; additional halvings
+    (image_size=64 needs one more than image_size=32) repeat at ch*2 width,
+    so image_size=32 reproduces the original CIFAR architecture exactly."""
 
-    def __init__(self, latent_channels: int, ch: int = 64):
+    def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
+                width_mult: int = 2):
         super().__init__()
+        n_down = (image_size // 4).bit_length() - 1
+        if 4 << n_down != image_size:
+            raise ValueError(f"image_size must be a power of two >= 8, got {image_size}")
+        n_blocks = n_down - 1  # halvings after the stem's own halving
+        out_ch = [ch * width_mult] * (n_blocks - 1) + [latent_channels]
+        in_ch = [ch] + out_ch[:-1]
+
         self.latent_channels = latent_channels
         self.stem = nn.Sequential(
-            nn.Conv2d(3, ch, 4, 2, 1),                  # 16x16
+            nn.Conv2d(3, ch, 4, 2, 1),                  # image_size/2
             nn.SiLU(),
         )
         self.features = nn.Sequential(
-            SpatialResidualDownBlock(ch, ch * 2),       # 8x8
-            SpatialResidualDownBlock(ch * 2, latent_channels),  # 4x4
+            *(SpatialResidualDownBlock(i, o) for i, o in zip(in_ch, out_ch))
         )
         self.latent_norm = nn.BatchNorm1d(latent_channels)
 
@@ -226,16 +253,26 @@ class SpatialResidualEncoder(nn.Module):
 
 
 class SpatialResidualDecoder(nn.Module):
-    """Decode a flattened Cx4x4 code while retaining its spatial topology."""
+    """Decode a flattened Cx4x4 code while retaining its spatial topology,
+    mirroring SpatialResidualEncoder for any supported image_size."""
 
-    def __init__(self, latent_channels: int, ch: int = 64):
+    def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
+                width_mult: int = 2):
         super().__init__()
+        n_down = (image_size // 4).bit_length() - 1
+        if 4 << n_down != image_size:
+            raise ValueError(f"image_size must be a power of two >= 8, got {image_size}")
+        n_blocks = n_down - 1
+        enc_out_ch = [ch * width_mult] * (n_blocks - 1) + [latent_channels]
+        enc_in_ch = [ch] + enc_out_ch[:-1]
+        dec_out_ch = list(reversed(enc_in_ch))
+        dec_in_ch = [latent_channels] + dec_out_ch[:-1]
+
         self.latent_channels = latent_channels
         self.net = nn.Sequential(
-            SpatialResidualUpBlock(latent_channels, ch * 2),  # 8x8
-            SpatialResidualUpBlock(ch * 2, ch),               # 16x16
+            *(SpatialResidualUpBlock(i, o) for i, o in zip(dec_in_ch, dec_out_ch)),
             nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(ch, 3, 3, 1, 1),                       # 32x32
+            nn.Conv2d(ch, 3, 3, 1, 1),                       # image_size
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -244,26 +281,38 @@ class SpatialResidualDecoder(nn.Module):
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, latent_dim: int, ch: int = 64, architecture: str = "plain"):
+    def __init__(self, latent_dim: int, ch: int = 64, architecture: str = "plain",
+                image_size: int = 32):
         super().__init__()
         self.latent_dim = latent_dim
         self.architecture = architecture
+        if architecture == "plain" and image_size != 32:
+            raise ValueError("architecture='plain' assumes image_size=32")
         if architecture == "plain":
             self.enc = Encoder(latent_dim, ch)
             self.dec = Decoder(latent_dim, ch)
         elif architecture == "residual":
-            self.enc = ResidualEncoder(latent_dim, ch)
-            self.dec = ResidualDecoder(latent_dim, ch)
+            self.enc = ResidualEncoder(latent_dim, ch, image_size)
+            self.dec = ResidualDecoder(latent_dim, ch, image_size)
         elif architecture == "spatial":
             if latent_dim % 16:
                 raise ValueError("spatial architecture requires latent_dim divisible by 16")
             latent_channels = latent_dim // 16
-            self.enc = SpatialResidualEncoder(latent_channels, ch)
-            self.dec = SpatialResidualDecoder(latent_channels, ch)
+            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size)
+            self.dec = SpatialResidualDecoder(latent_channels, ch, image_size)
+        elif architecture == "hybrid":
+            # spatial's structure-preserving 4x4 grid bottleneck, widened to
+            # residual's channel capacity (ch*4 instead of spatial's ch*2) --
+            # tests whether the two levers combine for mutual benefit.
+            if latent_dim % 16:
+                raise ValueError("hybrid architecture requires latent_dim divisible by 16")
+            latent_channels = latent_dim // 16
+            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size, width_mult=4)
+            self.dec = SpatialResidualDecoder(latent_channels, ch, image_size, width_mult=4)
         else:
             raise ValueError(
                 f"unknown autoencoder architecture {architecture!r}; "
-                "expected 'plain', 'residual', or 'spatial'"
+                "expected 'plain', 'residual', 'spatial', or 'hybrid'"
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

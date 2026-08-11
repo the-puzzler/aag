@@ -103,3 +103,76 @@ def intrinsic_dimension_twonn(h: torch.Tensor, frac: float = 0.9, max_pts: int =
     y = -torch.log(1 - F.clamp_max(1 - 1e-9))
     # least squares through the origin: d = sum(xy)/sum(x^2)
     return float((x * y).sum() / (x * x).sum())
+
+
+# --------------------------------------------------------------------------- #
+# conditional (attribute-aware) diagnostics
+# --------------------------------------------------------------------------- #
+def conditional_group_w2(z, cond, *, k, n_eval=20, gen=None, n_dirs=16):
+    """Mean max-projected-W2 over n_eval k-NN-by-Hamming attribute neighbourhoods.
+
+    This is the same statistic the conditional transport step optimises, so on
+    its own it only shows the optimiser working -- always pair it with
+    random_subset_w2() below and report the RATIO.
+    """
+    import torch
+    from .gaussianize import _gaussian_quantiles
+    scores = []
+    for _ in range(n_eval):
+        qi = int(torch.randint(z.shape[0], (1,), device=z.device, generator=gen))
+        dist = (cond != cond[qi:qi + 1]).sum(1)
+        idx = torch.topk(dist, min(k, z.shape[0]), largest=False).indices
+        zs = z[idx]
+        dirs = torch.randn(n_dirs, z.shape[1], device=z.device, generator=gen)
+        dirs = dirs / dirs.norm(dim=1, keepdim=True)
+        s, _ = torch.sort(zs @ dirs.T, dim=0)
+        q = _gaussian_quantiles(zs.shape[0], z.device, z.dtype).unsqueeze(1)
+        scores.append(float(((s - q) ** 2).mean(0).max()))
+    return sum(scores) / len(scores)
+
+
+def random_subset_w2(z, *, k, n_eval=20, gen=None, n_dirs=16):
+    """Same statistic on RANDOM subsets of matched size = the independence floor.
+
+    If z is independent of the condition, an attribute-selected neighbourhood is
+    statistically indistinguishable from a random subset, so
+    conditional_group_w2 / random_subset_w2 -> 1.0 is the convergence target.
+    """
+    import torch
+    from .gaussianize import _gaussian_quantiles
+    scores = []
+    for _ in range(n_eval):
+        idx = torch.randperm(z.shape[0], device=z.device, generator=gen)[:k]
+        zs = z[idx]
+        dirs = torch.randn(n_dirs, z.shape[1], device=z.device, generator=gen)
+        dirs = dirs / dirs.norm(dim=1, keepdim=True)
+        s, _ = torch.sort(zs @ dirs.T, dim=0)
+        q = _gaussian_quantiles(zs.shape[0], z.device, z.dtype).unsqueeze(1)
+        scores.append(float(((s - q) ** 2).mean(0).max()))
+    return sum(scores) / len(scores)
+
+
+def independence_ratio(z, cond, *, k, n_eval=20, gen=None):
+    """conditional_group_w2 / random_subset_w2. 1.0 == z independent of cond."""
+    return (conditional_group_w2(z, cond, k=k, n_eval=n_eval, gen=gen)
+            / random_subset_w2(z, k=k, n_eval=n_eval, gen=gen))
+
+
+def transport_objective_floor(n, d, *, search_subset=2048, n_dirs=64, reps=30,
+                              device="cuda", gen=None):
+    """Noise floor of the greedy transport objective: its value on a TRUE N(0,I)
+    cloud of matched size. The assignment is done improving once the running
+    objective enters this band -- past that it cannot see progress while
+    transport displacement keeps accumulating."""
+    import numpy as np, torch
+    from .gaussianize import _gaussian_quantiles, _rand_unit
+    z = torch.randn(n, d, device=device, generator=gen)
+    out = []
+    for _ in range(reps):
+        idx = torch.randperm(n, device=device, generator=gen)[:search_subset]
+        zs = z[idx]
+        dirs = _rand_unit(n_dirs, d, device, z.dtype)
+        s, _ = torch.sort(zs @ dirs.T, dim=0)
+        q = _gaussian_quantiles(search_subset, device, z.dtype).unsqueeze(1)
+        out.append(float(((s - q) ** 2).mean(0).max()))
+    return float(np.mean(out)), float(np.std(out))

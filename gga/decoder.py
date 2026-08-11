@@ -16,16 +16,21 @@ import torch.nn as nn
 
 
 class ResidualDecoder(nn.Module):
-    """z (whitened Gaussian coords) -> h (AE latent).  Plain residual MLP."""
+    """z (whitened Gaussian coords) -> h (AE latent).  Plain residual MLP.
 
-    def __init__(self, dim: int, width: int = 512, blocks: int = 4):
+    out_dim defaults to dim (the usual same-dimension z->h map); pass a
+    different out_dim for a conditional generator where the input is
+    z concatenated with a condition vector but the output is still h-sized."""
+
+    def __init__(self, dim: int, width: int = 512, blocks: int = 4, out_dim: int | None = None):
         super().__init__()
+        out_dim = dim if out_dim is None else out_dim
         self.inp = nn.Linear(dim, width)
         self.blocks = nn.ModuleList(
             nn.Sequential(nn.Linear(width, width), nn.SiLU(), nn.Linear(width, width))
             for _ in range(blocks)
         )
-        self.out = nn.Linear(width, dim)
+        self.out = nn.Linear(width, out_dim)
 
     def forward(self, z):
         x = self.inp(z)

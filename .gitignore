@@ -1,6 +1,28 @@
-# Experiment outputs and downloaded datasets
+# ---------------------------------------------------------------------------
+# Experiment outputs.  Every results_* dir holds checkpoints, .pt tensors and
+# sample grids -- tens of GB.  Regenerate them, don't track them.
+# ---------------------------------------------------------------------------
 /results/
+/results_*/
+
+# Downloaded / cached datasets
 /data/
+
+# Superseded scripts and old results, staged for deletion (see PIPELINE.md)
+/archive/
+
+# ---------------------------------------------------------------------------
+# Safety net: model weights and array dumps must never be committed, wherever
+# they land.  Sample grids and plots are regenerable via plots/*.py.
+# ---------------------------------------------------------------------------
+*.pt
+*.pth
+*.npz
+*.ckpt
+*.safetensors
+
+# Large binary docs
+*.docx
 
 # Local Python environments and caches
 /.venv/
