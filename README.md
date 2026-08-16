@@ -26,7 +26,7 @@ condition control separate things, which is what the conditional transport buys.
 
 ### CIFAR-10 — conditional on class
 
-Each row is one class, each column a fresh `z`.
+Each row is one class (labelled), each column a fresh `z`.
 
 ![CIFAR-10 class conditioning](assets/cifar_cond_classes.png)
 
@@ -48,9 +48,6 @@ never saw.
 
 ![Doom video generation](assets/doom_video.gif)
 
-Static grid, and reconstruction against ground truth:
-
-![Doom video samples](assets/doom_video_samples.png)
 
 ---
 

@@ -63,8 +63,9 @@ def main():
     T, H, W = gen.shape[1], gen.shape[2], gen.shape[3]
     s, pad = a.scale, 2
     rows = a.rows + (1 if a.real_strip else 0)
+    gutter = 96 if a.real_strip else 0          # left margin for the row labels
     canvas_h = rows * (H * s + pad) + pad
-    canvas_w = a.cols * (W * s + pad) + pad
+    canvas_w = gutter + a.cols * (W * s + pad) + pad
     vw = cv2.VideoWriter(a.out, cv2.VideoWriter_fourcc(*"mp4v"), a.fps, (canvas_w, canvas_h))
 
     def tile(img):
@@ -85,11 +86,17 @@ def main():
                     else:
                         continue
                     y0 = pad + r * (H * s + pad)
-                    x0 = pad + c * (W * s + pad)
+                    x0 = gutter + pad + c * (W * s + pad)
                     canvas[y0:y0 + H * s, x0:x0 + W * s] = tile(src)
             if a.real_strip:
-                cv2.putText(canvas, "REAL", (6, 16), cv2.FONT_HERSHEY_SIMPLEX, .45,
-                            (200, 200, 200), 1, cv2.LINE_AA)
+                # row labels in the left gutter: 'real' beside row 0,
+                # 'generated' centred over the remaining rows
+                y_real = pad + (H * s) // 2 + 5
+                cv2.putText(canvas, "real", (10, y_real), cv2.FONT_HERSHEY_SIMPLEX,
+                            .55, (230, 230, 230), 1, cv2.LINE_AA)
+                y_gen = pad + (H * s + pad) + (a.rows * (H * s + pad)) // 2 + 5
+                cv2.putText(canvas, "generated", (10, y_gen), cv2.FONT_HERSHEY_SIMPLEX,
+                            .55, (230, 230, 230), 1, cv2.LINE_AA)
             vw.write(canvas)
     vw.release()
     print(f"wrote {a.out}  ({canvas_w}x{canvas_h}, {T} frames x {a.loops} loops @ {a.fps}fps)")
