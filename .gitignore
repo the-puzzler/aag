@@ -1,9 +1,18 @@
 # ---------------------------------------------------------------------------
 # Experiment outputs.  Every results_* dir holds checkpoints, .pt tensors and
 # sample grids -- tens of GB.  Regenerate them, don't track them.
+# No trailing slash: several results_* entries are SYMLINKS to /data/aag_results
+# (see PIPELINE.md "Where results live"), and a trailing slash misses those.
 # ---------------------------------------------------------------------------
-/results/
-/results_*/
+/results
+/results_*
+
+# Rendered videos are regenerable (make_doom_mp4.py); README assets are tracked
+*.mp4
+!assets/*
+
+# Local-only research tree: toy studies, superseded scripts, parked paper draft
+/research/
 
 # Downloaded / cached datasets
 /data/
@@ -17,6 +26,8 @@
 # ---------------------------------------------------------------------------
 *.pt
 *.pth
+# ...except the released headline checkpoints (small, see weights/README)
+!/weights/**
 *.npz
 *.ckpt
 *.safetensors
@@ -24,10 +35,16 @@
 # Large binary docs
 *.docx
 
-# Local Python environments and caches
+# Local Python environments, caches and build artefacts
 /.venv/
+/*.egg-info/
 __pycache__/
 *.py[cod]
+
+# Paper draft: parked. Figures regenerate via paper/make_figs.py; the compiled
+# PDF and the vendored LaTeX toolchain are not tracked.
+/paper/main.pdf
+/paper/tectonic
 
 # Local editor and operating-system files
 .DS_Store

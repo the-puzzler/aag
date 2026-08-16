@@ -1,0 +1,14 @@
+[project]
+name = "aag"
+version = "0.1.0"
+description = "Amortised Assignment Generation: one-pass generation from a persistent Gaussian assignment"
+requires-python = ">=3.10"
+# Runtime deps are managed in the project venv; listed here for reference only.
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["aag"]

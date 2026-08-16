@@ -15,19 +15,21 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np, torch
 from torchvision.utils import make_grid
-from gga.ae import AutoEncoder
-from gga.celeba_data import celeba_loaders
+from aag.ae import AutoEncoder
+from aag.datasets import get_loaders, spec as dataset_spec
 
 ap = argparse.ArgumentParser()
 ap.add_argument("checkpoints", nargs="+", type=Path)
 ap.add_argument("--labels", nargs="*", default=None)
 ap.add_argument("--curve", type=Path, default=None)
 ap.add_argument("--n", type=int, default=8)
-ap.add_argument("--data", default="/data/hf_cache")
+ap.add_argument("--dataset", choices=["celeba", "cifar10"], default="celeba")
+ap.add_argument("--data", default=None, help="defaults to the dataset's usual root")
 ap.add_argument("--out", type=Path, required=True)
 a = ap.parse_args()
 labels = a.labels or [p.stem for p in a.checkpoints]
 dev = "cuda" if torch.cuda.is_available() else "cpu"
+data_root = a.data or dataset_spec(a.dataset)["default_root"]
 
 models = []
 for p, lab in zip(a.checkpoints, labels):
@@ -36,7 +38,8 @@ for p, lab in zip(a.checkpoints, labels):
                      image_size=ck["image_size"]).to(dev).eval()
     ae.load_state_dict(ck["model_state_dict"]); models.append((lab, ae, ck))
 
-_, _, test_loader, _ = celeba_loaders(a.data, a.n, n_particles=1, image_size=models[0][2]["image_size"])
+_, _, test_loader, _ = get_loaders(a.dataset, data_root, a.n, n_particles=1,
+                                   image_size=models[0][2]["image_size"])
 originals = next(iter(test_loader))[0][:a.n].to(dev)
 
 nrow = 1 + len(models)

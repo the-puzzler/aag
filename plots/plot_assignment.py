@@ -20,8 +20,8 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np, torch
 from scipy import stats
-from gga.gaussianize import whiten
-from gga.diagnostics import transport_objective_floor
+from aag.gaussianize import whiten
+from aag.diagnostics import transport_objective_floor
 
 ap = argparse.ArgumentParser()
 ap.add_argument("assignments", nargs="+", type=Path)
@@ -43,7 +43,8 @@ for p, lab in zip(a.assignments, labels):
 d = loaded[0][1].shape[1]
 floor, floor_sd = transport_objective_floor(loaded[0][1].shape[0], d)
 has_ratio = any("ratio" in c for _, _, c, _ in loaded)
-ncol = 6 if has_ratio else 5
+has_knn = any("knn" in c and c["knn"] for _, _, c, _ in loaded)
+ncol = 5 + (1 if has_ratio else 0) + (1 if has_knn else 0)
 fig, axes = plt.subplots(len(loaded), ncol, figsize=(3.5 * ncol, 3.6 * len(loaded)), squeeze=False)
 g = torch.Generator().manual_seed(0)
 
@@ -84,6 +85,11 @@ for r, (lab, z, curve, z0) in enumerate(loaded):
         ax[4].set_xlabel("step")
     ax[4].set_title("transport displacement")
 
+    if has_knn:
+        ax[ncol - 1].plot(curve["step"], curve["knn"], color="#2ca25f", lw=1.6)
+        ax[ncol - 1].axhline(1.0, ls="--", c="k", lw=.8, label="1.0 = locality kept")
+        ax[ncol - 1].set_ylim(0, 1.05); ax[ncol - 1].legend(fontsize=7)
+        ax[ncol - 1].set_title("kNN preservation"); ax[ncol - 1].set_xlabel("step")
     if has_ratio:
         if "ratio" in curve:
             ax[5].axhline(1.0, color="k", ls="--", lw=1.4, label="1.0 = independent")
@@ -101,5 +107,6 @@ for lab, z, curve, z0 in loaded:
     bits = [f"{lab}"]
     if z0 is not None: bits.append(f"displacement {(z - z0).norm(dim=1).mean():.3f}")
     if "ratio" in curve: bits.append(f"independence ratio {curve['ratio'][-1]:.3f}")
+    if curve.get("knn"): bits.append(f"knn {curve['knn'][-1]:.3f}")
     if "proj_over_gauss" in curve: bits.append(f"proj/gauss {curve['proj_over_gauss'][-1]:.3f}")
     print("  " + "  |  ".join(bits))
