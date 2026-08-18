@@ -176,7 +176,7 @@ Count *independent* units, not augmented segments:
 | dataset | independent N | d | N/d | outcome |
 |---|---|---|---|---|
 | CelebA | 162,770 | 64 | 2,543 | works |
-| CIFAR-10 | 50,000 | 64 | 781 | works |
+| CIFAR-10 | 50,000 | 64 | 781 | works, but underperforms a flow-matching baseline |
 | UCF-101 | 9,537 clips | 256 | **37** | fails — thin structure unrecoverable |
 | Doom video | 70,000 episodes | 256 | 273 | marginal: 20k+ steps needed |
 | Doom video | 70,000 episodes | 64 | 1,094 | best result (FID 60.10) |
@@ -184,6 +184,39 @@ Count *independent* units, not augmented segments:
 Rule of thumb: keep independent-N/d in the ~10³ regime; reducing `d` toward a
 few × the intrinsic dimension (TwoNN) is the cheapest lever and improved FID
 outright.
+
+**More samples keep paying on some datasets and not others, and the intrinsic
+dimension does not predict which.** Holding the AE, the assignment budget
+(64k steps) and the generator recipe fixed and varying only N:
+
+| dataset | N | TwoNN | N / TwoNN | G | FID (40 ep) |
+|---|---|---|---|---|---|
+| CIFAR-10 | 6,250 | 29.8 | 210 | 0.60 | 67.24 |
+| CIFAR-10 | 12,500 | 30.3 | 413 | 0.55 | 56.49 |
+| CIFAR-10 | 25,000 | 29.6 | 845 | 0.55 | 51.11 |
+| CIFAR-10 | 50,000 | 29.0 | 1,690 | 0.60 | 46.14 |
+| CelebA | 50,000 | 27.0 | 1,852 | 0.57 | 21.73 |
+| CelebA | 162,770 | 27.2 | 5,985 | 0.76 | 22.54 |
+
+(Probe runs at a fixed 40 epochs for comparability — not the showcase numbers.)
+
+CIFAR gains ~5 FID per doubling of N with no sign of flattening at 50k, so it
+is genuinely sample-hungry. But the obvious explanation — too few samples per
+effective dimension — does not survive the control: **at essentially matched
+samples-per-intrinsic-dim (1,690 vs 1,852) CelebA reaches 21.7 where CIFAR
+reaches 46.1**, and CelebA is already saturated at N = 50,000, gaining nothing
+from 3.25× more data. TwoNN barely separates the two datasets (29 vs 27), so
+whatever makes CIFAR hard for this method is not captured by it. The working
+hypothesis is that the deterministic one-pass z→pixel map suits a smooth,
+aligned, low-diversity manifold (faces) and struggles on a fragmented one (ten
+disjoint semantic classes, unaligned) — untested.
+
+Two confounds, pulling opposite ways. In the full-N arm's favour: 40 epochs
+over 162,770 samples is 3.25× more gradient steps. Against it: at a fixed 64k
+budget the larger assignment is less converged (G 0.76 vs 0.57). The second is
+bounded by the CIFAR sweep in §5 — moving G from 1.07 to 0.56 there was worth
+only ~1.7 FID, so a 0.76 → 0.57 difference can account for well under 1 FID,
+far short of the gain 3.25× more data should have produced.
 
 **Steps scale hard with d.** `d = 64` reaches its G floor in ~4k steps;
 `d = 256` was still improving at 160k. The greedy search is nearly blind in high
@@ -222,6 +255,19 @@ is still improving (see the stopping note in §2). Conditional steps are also th
 - **Keep LPIPS in the AE loss.** MSE-only training gives misleading checkpoint
   selection; LPIPS is also load-bearing during sparse-supervision experiments
   (removing it collapsed a top-k-MSE fine-tune outright).
+- **Feed an unconditional generator an unconditional assignment.** Conditional
+  transport steps reshape z to be Gaussian *within each condition group*; a
+  generator that never sees the condition cannot exploit that and simply pays
+  for the extra scrambling. Training CIFAR's unconditional generator on the
+  class-conditional assignment cost ~7 FID at a matched step budget — the
+  single largest error found in that pipeline. (That 7 is an upper bound on the
+  bug alone: the comparison also carries an AE-ceiling improvement of 33.4 →
+  31.0, so ~2.4 of it is representation, not wiring.)
+- **The generator's LPIPS weight matters far more than its size.** On CIFAR,
+  raising `--lpips-weight` from 0.5 to 8 was worth ~4.6 FID, while a 4×
+  parameter increase (2.1M → 7.9M) bought under 2. Tune the loss before the
+  architecture. An L1 pixel term instead of L2, and an added focal-frequency
+  term, were both washes.
 - **Standard figures**: `plots/plot_assignment.py <assignment.pt> --out f.png`
   (six-panel view used throughout), `plots/plot_ae.py`, `plots/plot_generations.py`.
 
