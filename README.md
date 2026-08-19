@@ -37,18 +37,47 @@ never saw.
 
 ## Baselines at matched budget
 
-FID vs generator training steps against [MeanFlow](https://arxiv.org/abs/2505.13447)
-(one-step, faithful reimplementation verified against the official code) and
-standard Flow Matching — same CelebA data, same ~7.2M parameter budget, same FID
-protocol. AAG's advantage concentrates early: FID 26 within 13k steps, where both
-baselines are still above 130. Flow Matching eventually draws close but plateaus
-at ~20.2 using 10 sampling steps per image, against AAG's 19.36 in a single pass;
-MeanFlow converges far higher (86.6) at this model scale.
+FID vs generator training steps against standard Flow Matching — same CelebA
+data, same ~7.2M parameter budget, same FID protocol (10k samples, CelebA test
+statistics). AAG's advantage is concentrated in early training: it reaches FID
+24 in 20k steps, where flow matching is still at 143 and needs roughly 70k
+steps to get under 30. The two draw level around 80k steps (22.3 each). Beyond
+that flow matching plateaus at ~20.4, while AAG continues to 19.36 — though it
+was trained far longer to get there, so the endpoints are not step-matched.
+
+Every point on both curves was measured under one protocol: AAG in a single
+forward pass, flow matching with 10 Euler steps per image.
 
 *Disclaimer: these curves come from a dedicated convergence-speed comparison run,
 not from the runs that produced the sample images above.*
 
 ![Baseline comparison](assets/baselines_fid_vs_steps.png)
+
+### Head to head
+
+| dataset | AAG | Flow Matching | AAG params | FM params |
+|---|---|---|---|---|
+| CelebA 64×64 | **19.36** | 20.35 | 7.3M | 7.2M |
+| CIFAR-10 32×32 | 45.91 | **39.26** | 2.1M | 4.9M |
+
+AAG generates in one pass; flow matching uses 10. CelebA is AAG's best case and
+CIFAR-10 its worst — the two differ in how much data each has per unit of latent
+complexity, which is the axis below.
+
+### Data scaling on CIFAR-10
+
+Holding the autoencoder, the assignment budget and the generator recipe fixed and
+varying only how many training images exist, CIFAR-10 gains roughly 5 FID per
+doubling with no sign of flattening at 50k — the full dataset. It is the one
+setting where AAG is clearly data-starved, and it is also where it loses to flow
+matching.
+
+![CIFAR-10 data scaling](assets/cifar_data_scaling.png)
+
+The obvious explanation — too few samples per effective dimension — does not
+survive a control: CelebA at a matched 1,852 samples per intrinsic dimension
+reaches 21.7, where CIFAR at 1,690 reaches 46.1, and CelebA gains nothing from
+3.25× more data. See [`docs/METHOD.md`](docs/METHOD.md) §5.
 
 ## How it works
 
@@ -86,8 +115,9 @@ Each headline experiment is one script:
 ```bash
 experiments/celeba_uncond.sh       # FID 19.36
 experiments/celeba_cond.sh         # FID 20.83
+experiments/cifar10_uncond.sh      # FID 45.91
 experiments/cifar10_cond.sh
-experiments/doom_worldmodel.sh
+experiments/doom_worldmodel.sh     # frame AE, required by doom_video.sh
 experiments/doom_video.sh          # held-out FID 58.81
 ```
 
