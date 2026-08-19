@@ -13,4 +13,4 @@ for how each is constructed and used.
     doom/worldmodel_generator.pt  (z, 3 frames, action) -> next frame (500 ep)
     doom/video_ae.pt              3D video AE dim=64 (spatial grid latent)
     doom/video_generator.pt       first-frame-conditioned 16-frame clips,
-                                  held-out FID 60.10 (ep 16)
+                                  held-out FID 58.81 (ep 28: 16 ep at lr 2e-3, then 12 more on a fresh cosine at 5e-4)

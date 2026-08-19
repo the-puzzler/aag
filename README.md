@@ -24,23 +24,7 @@ condition control separate things, which is what the conditional transport buys.
 
 ![CelebA attribute conditioning](assets/celeba_cond_attributes.png)
 
-### CIFAR-10 — conditional on class
-
-Each row is one class (labelled), each column a fresh `z`.
-
-![CIFAR-10 class conditioning](assets/cifar_cond_classes.png)
-
-### Doom — action-conditioned world model
-
-Predicts the next frame from the three preceding frames plus the agent's action.
-Each row: the three context frames, the action taken, six alternative
-continuations from different `z`, and the real next frame — on episodes the
-model never saw. The scene is pinned by the context; `z` decides the uncertain
-content, and several draws land close to what actually happened.
-
-![Doom world model](assets/doom_worldmodel.png)
-
-### Doom — first-frame-conditioned video · held-out FID 60.10
+### Doom — first-frame-conditioned video · held-out FID 58.81
 
 Give it one frame; it generates a 16-frame clip. Top row is **real** held-out
 footage for reference, the rest are generated from fresh `z` on episodes the model
@@ -50,6 +34,21 @@ never saw.
 
 
 ---
+
+## Baselines at matched budget
+
+FID vs generator training steps against [MeanFlow](https://arxiv.org/abs/2505.13447)
+(one-step, faithful reimplementation verified against the official code) and
+standard Flow Matching — same CelebA data, same ~7.2M parameter budget, same FID
+protocol. AAG's advantage concentrates early: FID 26 within 13k steps, where both
+baselines are still above 130. Flow Matching eventually draws close but plateaus
+at ~20.2 using 10 sampling steps per image, against AAG's 19.36 in a single pass;
+MeanFlow converges far higher (86.6) at this model scale.
+
+*Disclaimer: these curves come from a dedicated convergence-speed comparison run,
+not from the runs that produced the sample images above.*
+
+![Baseline comparison](assets/baselines_fid_vs_steps.png)
 
 ## How it works
 
@@ -89,7 +88,7 @@ experiments/celeba_uncond.sh       # FID 19.36
 experiments/celeba_cond.sh         # FID 20.83
 experiments/cifar10_cond.sh
 experiments/doom_worldmodel.sh
-experiments/doom_video.sh          # held-out FID 60.10
+experiments/doom_video.sh          # held-out FID 58.81
 ```
 
 Doom needs the [p-doom/doom-dataset](https://huggingface.co/datasets/p-doom/doom-dataset)

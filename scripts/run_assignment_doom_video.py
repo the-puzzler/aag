@@ -13,7 +13,8 @@ from pathlib import Path
 
 import torch
 
-from aag.gaussianize import whiten, greedy_rank_transport_step, continuous_knn_transport_step
+from aag.gaussianize import (whiten, greedy_rank_transport_step, continuous_knn_transport_step,
+                             offset_slab_cleanup_step, radial_chi_calibration)
 from aag.diagnostics import (r_dispersion, r_cond, knn_preservation, assignment_diagnostics, continuous_knn_w2,
                              random_subset_w2, intrinsic_dimension_twonn)
 
@@ -38,6 +39,9 @@ def main():
     ap.add_argument("--cond-metric", choices=["cosine", "l2"], default="cosine",
                      help="distance used for the k-NN condition neighbourhood")
     ap.add_argument("--eval-every", type=int, default=200)
+    ap.add_argument("--cleanup", action="store_true",
+                     help="interleave the slab-cleanup (every 2 steps) and radial chi "
+                          "calibration (every 20) used by the CelebA/CIFAR pipeline")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -65,6 +69,12 @@ def main():
         sc = greedy_rank_transport_step(z, search_subset=args.search_subset,
                                         n_dirs=args.n_dirs, alpha=args.alpha, gen=gen)
         curve["conv_step"].append(s); curve["conv_score"].append(sc)
+        if args.cleanup:
+            if s % 2 == 0:
+                offset_slab_cleanup_step(z, search_subset=args.search_subset,
+                                         n_slabs=32, eps=0.5, alpha=1.0, gen=gen)
+            if s % 20 == 0:
+                radial_chi_calibration(z, d=d, alpha_r=1.0)
         for _ in range(args.cond_per_step):
             continuous_knn_transport_step(z, cond, k=args.k, n_dirs=args.n_dirs,
                                           alpha=args.cond_alpha, gen=gen,

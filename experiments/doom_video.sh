@@ -1,5 +1,5 @@
 #!/bin/bash
-# Doom video, conditioned on a first frame.  Best result: held-out FID 60.10
+# Doom video, conditioned on a first frame.  Best result: held-out FID 58.81
 set -euo pipefail
 cd "$(dirname "$0")/.."
 V=.venv/bin/python
@@ -27,7 +27,13 @@ $V scripts/run_assignment_doom_video.py --particles $R/video_particles_dim64/par
 $V scripts/train_generator_doom_video.py --assignment $R/assignment_video/assignment.pt \
   --cond-mode adaln --epochs 16 --eval-every 4 --batch 32 --out $R/generator_video
 
+# warm restart: the first cosine anneals to ~0 by ep16 while held-out FID still
+# has headroom; a second cycle at a lower peak takes 60.1 -> 58.8 by ep28
+$V scripts/train_generator_doom_video.py --assignment $R/assignment_video/assignment.pt \
+  --cond-mode adaln --epochs 28 --start-epoch 16 --eval-every 4 --batch 32 --lr 5e-4 \
+  --resume $R/generator_video/generator_ep16.pt --out $R/generator_video
+
 $V scripts/eval_doom_video_fid.py --frame-ae "$FAE" \
-  --generators $R/generator_video/generator_ep16.pt
-$V scripts/make_doom_mp4.py --generator $R/generator_video/generator_ep16.pt --frame-ae "$FAE" \
+  --generators $R/generator_video/generator_ep28.pt
+$V scripts/make_doom_mp4.py --generator $R/generator_video/generator_ep28.pt --frame-ae "$FAE" \
   --rows 3 --cols 6 --real-strip --out $R/doom_video.mp4

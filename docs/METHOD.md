@@ -69,8 +69,11 @@ repeat S times:
 # G still falling at 160k; the best d=64 run used 4x its floor budget).
 ```
 
-Optional refinements, interleaved on the CelebA runs (the video runs did
-without): an offset-slab cleanup that Gaussianises a tangent coordinate inside a
+Optional refinements, interleaved on the CelebA/CIFAR runs. The Doom pipelines
+omit them — an unrevisited engineering omission when those scripts were written
+for the new condition types, not a measured choice; without the radial pass the
+shell error is small but nonzero (radius QQ rmse 0.017 at d=64/16k vs exactly 0
+with it), and large when under-transported: an offset-slab cleanup that Gaussianises a tangent coordinate inside a
 thin slab `|n·z − b| < ε` (catching localized tail spikes single projections
 miss), and a radial calibration that rank-corrects `‖z‖` toward the exact χ_d
 law (the high-d shell error survives every 1-D test).
@@ -179,7 +182,7 @@ Count *independent* units, not augmented segments:
 | CIFAR-10 | 50,000 | 64 | 781 | works |
 | UCF-101 | 9,537 clips | 256 | **37** | fails — thin structure unrecoverable |
 | Doom video | 70,000 episodes | 256 | 273 | marginal: 20k+ steps needed |
-| Doom video | 70,000 episodes | 64 | 1,094 | best result (FID 60.10) |
+| Doom video | 70,000 episodes | 64 | 1,094 | best result (FID 58.81) |
 
 Rule of thumb: keep independent-N/d in the ~10³ regime; reducing `d` toward a
 few × the intrinsic dimension (TwoNN) is the cheapest lever and improved FID
