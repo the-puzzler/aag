@@ -2,11 +2,11 @@
 
 Generation in **one forward pass**, with no iterative sampler.
 
-Autoencoder latents are transported once, offline, onto a standard Gaussian. That
-transport is a *persistent assignment*: every training example keeps a fixed
-Gaussian coordinate `z`. A single feed-forward network is then trained to map that
-coordinate straight to pixels. At inference you draw `z ~ N(0,I)` and decode —
-one pass, no denoising loop, no autoregression.
+Autoencoder latents are transported once, offline, onto a standard Gaussian.
+The transport is a persistent assignment: each training example keeps a fixed
+coordinate `z`. A feed-forward network is then trained to map `z` to pixels.
+At inference, draw `z ~ N(0,I)` and decode: one pass, no denoising loop, no
+autoregression.
 
 ---
 
@@ -18,89 +18,69 @@ one pass, no denoising loop, no autoregression.
 
 ### CelebA — conditional on 40 attributes · FID 20.83
 
-Each row holds `z` fixed and toggles one attribute per column. Identity, pose and
-background persist along a row while the attribute changes — `z` and the
-condition control separate things, which is what the conditional transport buys.
+Each row holds `z` fixed and toggles one attribute per column. Identity, pose
+and background are preserved along a row, i.e. `z` and `c` control disjoint
+factors.
 
 ![CelebA attribute conditioning](assets/celeba_cond_attributes.png)
 
 ### Doom — first-frame-conditioned video · held-out FID 56.89
 
-Give it one frame; it generates a 16-frame clip. Top row is **real** held-out
-footage for reference, the rest are generated from fresh `z` on episodes the model
-never saw.
+One frame in, a 16-frame clip out. Top row is real held-out footage; the rest
+are generated from fresh `z` on unseen episodes.
 
 ![Doom video generation](assets/doom_video.gif)
 
 
 ---
 
-## Baselines at matched budget
+## Comparison with flow matching
 
-FID vs generator training steps against standard Flow Matching — same CelebA
-data, same ~7.2M parameter budget, same FID protocol (10k samples, CelebA test
-statistics). AAG's advantage is concentrated in early training: it reaches FID
-24 in 20k steps, where flow matching is still at 143 and needs roughly 70k
-steps to get under 30. The two draw level around 80k steps (22.3 each). Beyond
-that flow matching plateaus at ~20.4, while AAG continues to 19.36 — though it
-was trained far longer to get there, so the endpoints are not step-matched.
+Standard flow matching, same data, same FID protocol (10k samples, test-split
+reference statistics). AAG samples in one forward pass; flow matching uses 10
+Euler steps. Parameter counts are not equal: 3.37M vs 7.23M on CelebA, 2.12M vs
+4.90M on CIFAR-10.
 
-Every point on both curves was measured under one protocol: AAG in a single
-forward pass, flow matching with 10 Euler steps per image.
+CelebA 64x64:
 
-*Disclaimer: these curves come from a dedicated convergence-speed comparison run,
-not from the runs that produced the sample images above.*
-
-![Baseline comparison](assets/baselines_fid_vs_steps.png)
-
-### Head to head
-
-Read at matched generator steps, and again at whatever each method's best was.
-A single number flatters one side or the other, because the two converge at very
-different rates.
-
-**CelebA 64×64** — AAG 7.3M parameters, flow matching 7.2M:
-
-| generator steps | AAG (1 pass) | flow matching (10 steps) |
+| generator steps | AAG | flow matching |
 |---|---|---|
-| 20k | **24.14** | 142.67 |
+| 20k | 24.14 | 142.67 |
 | 80k | 22.31 | 22.31 |
-| 200k | 20.62 | **20.53** |
-| best reached | **19.36** (2.0M steps) | 20.35 (240k steps) |
+| 200k | 20.62 | 20.53 |
+| best | 19.36 (2.0M steps) | 20.35 (240k steps) |
 
-**CIFAR-10 32×32** — AAG 2.1M parameters, flow matching 4.9M:
+CIFAR-10 32x32:
 
-| generator steps | AAG (1 pass) | flow matching (10 steps) |
+| generator steps | AAG | flow matching |
 |---|---|---|
-| 12.5k | **45.91** | — (not measured; 20k is 208.1) |
-| 40k | **45.69** | 114.24 |
-| 80k | 46.45 | **39.26** |
-| best reached | 45.91 (12.5k steps) | **39.26** (80k steps) |
+| 12.5k | 45.91 | not measured |
+| 40k | 45.69 | 114.24 |
+| 80k | 46.45 | 39.26 |
+| best | 45.91 (12.5k steps) | 39.26 (80k steps) |
 
-The pattern is the same on both datasets and cuts both ways. AAG converges far
-faster — it is at 24 on CelebA and 46 on CIFAR while flow matching is still above
-100 — and then stops improving. Flow matching starts much worse and keeps going.
-Where they end up differs: on CelebA AAG carries on to 19.36 given enough steps,
-while on CIFAR-10 it plateaus at ~46 (320 epochs buys nothing over 128) and flow
-matching passes it somewhere between 60k and 80k steps.
+AAG converges faster on both datasets and then stops improving. Flow matching
+converges slower and continues. On CelebA AAG reaches 19.36; flow matching
+plateaus at 20.35. On CIFAR-10 AAG plateaus at ~46 by 40k steps and flow
+matching overtakes it between 60k and 80k steps, ending at 39.26.
 
-CelebA is AAG's best case and CIFAR-10 its worst; they differ in how much data
-each has per unit of latent complexity, which is the axis below.
+![FID vs training steps](assets/baselines_fid_vs_steps.png)
+
+Curves are from a separate convergence-speed run, not the runs that produced the
+sample images above.
 
 ### Data scaling on CIFAR-10
 
-Holding the autoencoder, the assignment budget and the generator recipe fixed and
-varying only how many training images exist, CIFAR-10 gains roughly 5 FID per
-doubling with no sign of flattening at 50k — the full dataset. It is the one
-setting where AAG is clearly data-starved, and it is also where it loses to flow
-matching.
+Autoencoder, assignment budget and generator recipe fixed; only the number of
+training images varies. FID improves by ~5 per doubling and has not flattened at
+50k, the full dataset.
 
 ![CIFAR-10 data scaling](assets/cifar_data_scaling.png)
 
-The obvious explanation — too few samples per effective dimension — does not
-survive a control: CelebA at a matched 1,852 samples per intrinsic dimension
-reaches 21.7, where CIFAR at 1,690 reaches 46.1, and CelebA gains nothing from
-3.25× more data. See [`docs/METHOD.md`](docs/METHOD.md) §5.
+Samples per effective dimension does not explain the CelebA/CIFAR-10 gap. At
+1,852 samples per intrinsic dimension CelebA reaches 21.7; at 1,690 CIFAR-10
+reaches 46.1. CelebA gains nothing from 3.25x more data. See
+[`docs/METHOD.md`](docs/METHOD.md) §5.
 
 ## How it works
 
@@ -140,7 +120,7 @@ experiments/celeba_uncond.sh       # FID 19.36
 experiments/celeba_cond.sh         # FID 20.83
 experiments/cifar10_uncond.sh      # FID 45.91
 experiments/cifar10_cond.sh
-experiments/doom_worldmodel.sh     # frame AE, required by doom_video.sh
+experiments/doom_worldmodel.sh     # (z, 3 frames, action) -> next frame
 experiments/doom_video.sh          # held-out FID 56.89
 ```
 
