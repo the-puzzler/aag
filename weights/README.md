@@ -6,8 +6,19 @@ for how each is constructed and used.
     celeba/ae.pt                  AE dim=64 (encoder feeds the assignment)
     celeba/generator_uncond.pt    FID 19.36  (2000 ep)
     celeba/generator_cond.pt      FID 20.83  (500 ep, 40 attributes)
-    cifar10/ae.pt                 AE dim=64, 32x32
+    cifar10/ae.pt                 AE dim=64, 32x32, 40 ep -- pairs with
+                                  generator_cond.pt
     cifar10/generator_cond.pt     class-conditional (500 ep)
+    cifar10/ae_uncond.pt          AE dim=64, 32x32, 150 ep (recon-FID 31.0 vs
+                                  33.4 for ae.pt) -- pairs with
+                                  generator_uncond.pt
+    cifar10/generator_uncond.pt   FID 45.91 (40 ep, lpips_weight 32 rather than
+                                  the usual 0.5, on a 64k-step unconditional
+                                  assignment). Trained on the UNCONDITIONAL
+                                  assignment: the earlier run used the
+                                  class-conditional one by mistake and paid
+                                  ~7 FID for scrambling the generator could not
+                                  use. See experiments/cifar10_uncond.sh.
     doom/frame_ae.pt              per-frame 2D AE dim=64 -- pairs with
                                   worldmodel_generator.pt
     doom/worldmodel_generator.pt  (z, 3 frames, action) -> next frame (500 ep)

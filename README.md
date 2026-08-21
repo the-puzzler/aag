@@ -55,14 +55,37 @@ not from the runs that produced the sample images above.*
 
 ### Head to head
 
-| dataset | AAG | Flow Matching | AAG params | FM params |
-|---|---|---|---|---|
-| CelebA 64×64 | **19.36** | 20.35 | 7.3M | 7.2M |
-| CIFAR-10 32×32 | 45.91 | **39.26** | 2.1M | 4.9M |
+Read at matched generator steps, and again at whatever each method's best was.
+A single number flatters one side or the other, because the two converge at very
+different rates.
 
-AAG generates in one pass; flow matching uses 10. CelebA is AAG's best case and
-CIFAR-10 its worst — the two differ in how much data each has per unit of latent
-complexity, which is the axis below.
+**CelebA 64×64** — AAG 7.3M parameters, flow matching 7.2M:
+
+| generator steps | AAG (1 pass) | flow matching (10 steps) |
+|---|---|---|
+| 20k | **24.14** | 142.67 |
+| 80k | 22.31 | 22.31 |
+| 200k | 20.62 | **20.53** |
+| best reached | **19.36** (2.0M steps) | 20.35 (240k steps) |
+
+**CIFAR-10 32×32** — AAG 2.1M parameters, flow matching 4.9M:
+
+| generator steps | AAG (1 pass) | flow matching (10 steps) |
+|---|---|---|
+| 12.5k | **45.91** | — (not measured; 20k is 208.1) |
+| 40k | **45.69** | 114.24 |
+| 80k | 46.45 | **39.26** |
+| best reached | 45.91 (12.5k steps) | **39.26** (80k steps) |
+
+The pattern is the same on both datasets and cuts both ways. AAG converges far
+faster — it is at 24 on CelebA and 46 on CIFAR while flow matching is still above
+100 — and then stops improving. Flow matching starts much worse and keeps going.
+Where they end up differs: on CelebA AAG carries on to 19.36 given enough steps,
+while on CIFAR-10 it plateaus at ~46 (320 epochs buys nothing over 128) and flow
+matching passes it somewhere between 60k and 80k steps.
+
+CelebA is AAG's best case and CIFAR-10 its worst; they differ in how much data
+each has per unit of latent complexity, which is the axis below.
 
 ### Data scaling on CIFAR-10
 
