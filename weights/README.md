@@ -8,9 +8,21 @@ for how each is constructed and used.
     celeba/generator_cond.pt      FID 20.83  (500 ep, 40 attributes)
     cifar10/ae.pt                 AE dim=64, 32x32
     cifar10/generator_cond.pt     class-conditional (500 ep)
-    doom/frame_ae.pt              per-frame 2D AE dim=64 (world-model latents +
-                                  the first-frame condition for video)
+    doom/frame_ae.pt              per-frame 2D AE dim=64 -- pairs with
+                                  worldmodel_generator.pt
     doom/worldmodel_generator.pt  (z, 3 frames, action) -> next frame (500 ep)
-    doom/video_ae.pt              3D video AE dim=64 (spatial grid latent)
+    doom/frame_ae_video.pt        per-frame 2D AE dim=64, retrained on the 3x
+                                  segment cache -- encodes the first-frame
+                                  condition, so it MUST be used with
+                                  video_generator.pt (frame_ae.pt will not match)
+    doom/video_ae.pt              3D video AE dim=64 (spatial grid latent),
+                                  retrained on the 3x cache; needed only to
+                                  rebuild the assignment, not at generation time
     doom/video_generator.pt       first-frame-conditioned 16-frame clips,
-                                  held-out FID 60.10 (ep 16)
+                                  held-out FID 56.89. Trained on 550k particles
+                                  (9 segments per episode instead of 3) with both
+                                  AEs retrained: 10 ep at lr 2e-3, restart to 12
+                                  at 5e-4, then to ep24 at 1e-3. FID plateaus at
+                                  ~56.8 (56.75/57.99/56.80/56.88/56.89 over
+                                  ep16-24); 56.89 is this checkpoint's own value,
+                                  not the best of the run.
