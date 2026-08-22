@@ -54,11 +54,8 @@ concatenated flat; `z` dominates it.
 
 Standard flow matching, same data, same FID protocol (10k samples, test-split
 reference statistics). AAG samples in one forward pass; flow matching uses 10
-Euler steps. Parameter counts are not equal at generation time: 3.37M vs 7.23M
-on CelebA, 2.12M vs 4.90M on CIFAR-10. The baseline was sized against AAG's
-train-time total (7.29M on CelebA: generator plus autoencoder), but the
-autoencoder only builds the assignment and is not used to generate, so the
-deployed AAG model is the smaller of the two.
+Euler steps. Parameter counts are not equal: 3.37M vs 7.23M on CelebA, 2.12M vs
+4.90M on CIFAR-10.
 
 CelebA 64x64:
 
