@@ -31,6 +31,22 @@ are generated from fresh `z` on unseen episodes.
 
 ![Doom video generation](assets/doom_video.gif)
 
+### Doom — action-conditioned world model · frame FID 60.18
+
+`(z, 3 previous frames, action)` -> next frame, applied autoregressively: the
+model is seeded with 3 real frames and then consumes its own output as context,
+with one action held fixed for 60 steps. Top row is real held-out footage; the
+rest are rollouts under the Forward action.
+
+![Doom world model, forward motion](assets/doom_worldmodel_forward.gif)
+
+The assignment is conditioned on both factors, and the independence ratio is
+1.12 against the random-subset floor (per-action mean 1.04). Frame quality does
+not imply action control, and the two must be measured separately: with a fresh
+`z` the generated frame matches the requested action 15.0% of the time against
+a 5.6% chance baseline. The conditioning enters as 18 of 274 input dimensions,
+concatenated flat; `z` dominates it.
+
 
 ---
 
@@ -38,8 +54,11 @@ are generated from fresh `z` on unseen episodes.
 
 Standard flow matching, same data, same FID protocol (10k samples, test-split
 reference statistics). AAG samples in one forward pass; flow matching uses 10
-Euler steps. Parameter counts are not equal: 3.37M vs 7.23M on CelebA, 2.12M vs
-4.90M on CIFAR-10.
+Euler steps. Parameter counts are not equal at generation time: 3.37M vs 7.23M
+on CelebA, 2.12M vs 4.90M on CIFAR-10. The baseline was sized against AAG's
+train-time total (7.29M on CelebA: generator plus autoencoder), but the
+autoencoder only builds the assignment and is not used to generate, so the
+deployed AAG model is the smaller of the two.
 
 CelebA 64x64:
 

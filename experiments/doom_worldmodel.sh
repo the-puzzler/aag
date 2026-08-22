@@ -1,6 +1,6 @@
 #!/bin/bash
 # Doom world model: predict frame t from the 3 preceding frames + the action.
-# Frame FID 59.56 (fresh z, 6k samples vs real held-out frames), from 84.0.
+# Frame FID 60.18 (fresh z, 6k samples vs real held-out frames), from 84.0.
 #
 # The whole gain came from the ASSIGNMENT, not the generator. The previous
 # version appeared to ignore the action: with its own assigned z it identified
@@ -16,7 +16,27 @@
 #     8                                   1.85    70.66    7.08           -
 #    32                                   1.23    33.83    1.92           -
 #   128                                   1.14    16.64    0.97           -
-#   112 context-only + 16 action          1.07     1.10    0.90        59.56
+#   112 context-only + 16 action          1.07     1.10    0.90       59.56
+#   the same, action sampled uniformly    1.01     1.12    1.12       60.18
+#
+# The last two rows differ only in how the action step picks its query. Sampling
+# a particle uniformly gives each action a share of the conditional budget equal
+# to its frequency, and the actions are skewed: Forward/Turn variants hold
+# 11-12% of particles each, Attack 2.8%. Per-action independence came out at
+# 1.05 for Forward but 1.67 for Attack, and Attack-ness leaking into a fresh z
+# put muzzle flashes into Forward rollouts. Sampling the ACTION uniformly first
+# gives every action 1/18 of the budget: Attack 1.67 -> 1.22, per-action mean
+# 1.17 -> 1.04, and the false-Attack rate falls to 5.4% against a 5.6% chance
+# baseline. This costs 0.6 FID and is the shipped model -- FID scores frame
+# quality, not whether the requested action is respected.
+#
+# Action control remains the open weakness. Measured on the shipped checkpoint
+# over 64 contexts, with a fresh z the generated frame matches the requested
+# action only 15.0% of the time against 5.6% chance, i.e. z overrides the action
+# in most samples. Both variants behave this way, so the cause is the
+# conditioning architecture -- 18 of 274 input dims, concatenated flat -- rather
+# than the assignment. AdaLN conditioning, as used by the video generator, is
+# the obvious next thing to try.
 #
 # So z was not independent of the visual CONTEXT, which put a fresh z
 # off-manifold and produced a frame 3-4x further from the truth whatever action
