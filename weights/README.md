@@ -19,15 +19,33 @@ for how each is constructed and used.
                                   class-conditional one by mistake and paid
                                   ~7 FID for scrambling the generator could not
                                   use. See experiments/cifar10_uncond.sh.
-    doom/frame_ae.pt              per-frame 2D AE dim=64 -- pairs with
-                                  worldmodel_generator.pt
-    doom/worldmodel_generator.pt  (z, 3 frames, action) -> next frame (500 ep)
-    doom/frame_ae_video.pt        per-frame 2D AE dim=64, retrained on the 3x
-                                  segment cache -- encodes the first-frame
-                                  condition, so it MUST be used with
-                                  video_generator.pt (frame_ae.pt will not match)
+    doom/frame_ae.pt              per-frame 2D AE dim=64, trained on the 3x
+                                  segment cache. Encodes the first-frame
+                                  condition for video AND the 3-frame context
+                                  for the world model -- both generators below
+                                  depend on it, so replace all three together.
+    doom/worldmodel_generator.pt  (z, 3 frames, action) -> next frame.
+                                  Frame FID 60.18 against real held-out frames
+                                  (fresh z, 6k samples), vs 84.0 for the previous
+                                  version. Two assignment changes, in order of
+                                  effect. First, most of the conditional budget
+                                  goes to CONTEXT-only neighbourhoods rather than
+                                  action-filtered ones, which took the frames
+                                  factor of the independence ratio from 83.8 to
+                                  ~1.1 -- z was never really leaking the action,
+                                  it was leaking the visual context. Second, the
+                                  action step samples the ACTION uniformly rather
+                                  than sampling a particle uniformly, so rare
+                                  actions get an equal share: Attack went from
+                                  1.67 to 1.22 and the per-action mean from 1.17
+                                  to 1.04.
+                                  An unbalanced variant scores marginally better
+                                  on FID (59.56) but was rejected on inspection of
+                                  forward-motion rollouts -- FID measures frame
+                                  quality, not whether the requested action is
+                                  respected. See experiments/doom_worldmodel.sh.
     doom/video_ae.pt              3D video AE dim=64 (spatial grid latent),
-                                  retrained on the 3x cache; needed only to
+                                  trained on the 3x cache; needed only to
                                   rebuild the assignment, not at generation time
     doom/video_generator.pt       first-frame-conditioned 16-frame clips,
                                   held-out FID 56.89. Trained on 550k particles
