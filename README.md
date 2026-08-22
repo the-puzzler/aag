@@ -33,19 +33,19 @@ are generated from fresh `z` on unseen episodes.
 
 ### Doom — action-conditioned world model · frame FID 60.18
 
-`(z, 3 previous frames, action)` -> next frame, applied autoregressively: the
-model is seeded with 3 real frames and then consumes its own output as context,
-with one action held fixed for 60 steps. Top row is real held-out footage; the
-rest are rollouts under the Forward action.
+```
+input = [ z(64) | h_{t-3..t-1}(192) | one-hot action(18) ]   = 274 dims
+     -> nn.Linear(274, 256*4*4) -> reshape 256x4x4 -> residual upsampling -> 64x64x3, tanh
+```
+
+`h` are per-frame autoencoder latents. Rollout re-encodes each generated frame
+to form the next context: seeded with 3 real frames, then fed its own output for
+60 steps with the action held fixed. Top row is real held-out footage.
 
 ![Doom world model, forward motion](assets/doom_worldmodel_forward.gif)
 
 The assignment is conditioned on both factors, and the independence ratio is
-1.12 against the random-subset floor (per-action mean 1.04). Frame quality does
-not imply action control, and the two must be measured separately: with a fresh
-`z` the generated frame matches the requested action 15.0% of the time against
-a 5.6% chance baseline. The conditioning enters as 18 of 274 input dimensions,
-concatenated flat; `z` dominates it.
+1.12 against the random-subset floor (per-action mean 1.04).
 
 
 ---
