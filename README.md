@@ -8,7 +8,7 @@ coordinate `z`. A feed-forward network is then trained to map `z` to pixels.
 At inference, draw `z ~ N(0,I)` and decode: one pass, no denoising loop, no
 autoregression.
 
-Associated Blog Post: [http://localhost:8000/blog/aag/](https://the-puzzler.github.io/blog/aag/)
+Associated Blog Post: https://the-puzzler.github.io/blog/aag/
 
 ---
 
