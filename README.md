@@ -10,6 +10,11 @@ autoregression.
 
 Associated Blog Post: https://the-puzzler.github.io/blog/aag/
 
+- [Results](#results)
+- [How it works](#how-it-works)
+- [Setup](#setup)
+- [Reproducing](#reproducing)
+
 ---
 
 ## Results
