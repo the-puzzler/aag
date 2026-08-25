@@ -266,6 +266,22 @@ def process_one(job):
                 pass
 
 
+def mem_snapshot() -> str:
+    """Dirty/Writeback/MemAvailable, in MB/GB. We had to guess at the cause of two
+    hard hangs precisely because nothing recorded these while the run was live."""
+    want = ("Dirty", "Writeback", "MemAvailable")
+    got = {}
+    try:
+        for line in open("/proc/meminfo"):
+            k, _, v = line.partition(":")
+            if k in want:
+                got[k] = int(v.split()[0])          # kB
+    except OSError:
+        return "mem n/a"
+    return (f"dirty {got.get('Dirty',0)/1024:.0f}M wb {got.get('Writeback',0)/1024:.0f}M "
+            f"avail {got.get('MemAvailable',0)/1e6:.0f}G")
+
+
 def free_gb(path) -> float:
     st = os.statvfs(path)
     return st.f_bavail * st.f_frsize / 1e9
@@ -303,6 +319,7 @@ def flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail, complete=
         np.save(t, np.array(data, np.int64))
         os.replace(t, args.out / (name + ".npy"))
     meta = dict(n_segments=w, frames=args.frames, size=args.size,
+                shard_size=args.shard_segments,
                 n_records=n_ok, per_record=args.chunks_per_video,
                 n_actions=N_ACTIONS, hud_row=HUD_ROW, source="vpt",
                 subsets=args.subsets, keys=KEYS, complete=complete,
@@ -333,13 +350,19 @@ def main():
                     help="few chunks from many videos -- episode-level N is what bounds "
                          "usable latent dim")
     ap.add_argument("--limit-videos", type=int, default=None)
-    ap.add_argument("--workers", type=int, default=12,
-                    help="12-way download measured at 246 MB/s aggregate")
+    ap.add_argument("--workers", type=int, default=8,
+                    help="8 is enough: the network caps at ~250 MB/s and 8 streams "
+                         "reach it, while fewer concurrent readers/writers cut the "
+                         "I/O pressure that wedged this box twice")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--capacity-factor", type=float, default=0.82,
                     help="fraction of n_total*chunks to preallocate; observed yield "
                          "is ~0.79 (82%% of videos resolve, ~96%% of chunks kept)")
     ap.add_argument("--min-root-gb", type=float, default=8.0)
+    ap.add_argument("--shard-segments", type=int, default=8192,
+                    help="segments per shard file; one shard mapping is live at a "
+                         "time, which bounds the dirty page set (8192 x 80 frames "
+                         "at 64px = 8.1 GB per shard)")
     ap.add_argument("--min-out-gb", type=float, default=25.0)
     args = ap.parse_args()
 
@@ -362,13 +385,41 @@ def main():
     n_total = len(cands)                                 # BEFORE the done filter
 
     done_path = args.out / "done.jsonl"
-    done = set()
+    # done.jsonl is appended per video but the sidecars flush every 200, so an
+    # unclean death leaves videos marked done whose segments sit BEYOND
+    # len(labels). Those would be skipped on resume while their data gets
+    # overwritten -- a silent loss (4.16% when this box hard-hung at 10:33).
+    # Reconcile: keep only the done prefix whose cumulative chunk count is
+    # covered by the last flushed labels.npy, and re-fetch the rest.
+    done_recs = []
     if done_path.exists():
         for line in open(done_path):
+            line = line.strip()
+            if not line:
+                continue
             try:
-                done.add(json.loads(line)["relpath"])
+                done_recs.append(json.loads(line))
             except Exception:
                 pass
+    flushed = 0
+    lab_path = args.out / "labels.npy"
+    if lab_path.exists():
+        flushed = int(np.load(lab_path).shape[0])
+    keep, run = [], 0
+    for rec in done_recs:
+        run += int(rec.get("chunks", 0))
+        if run > flushed:
+            break
+        keep.append(rec)
+    dropped = len(done_recs) - len(keep)
+    if dropped:
+        print(f"reconciling done.jsonl: dropping {dropped} videos ({run - flushed}+ "
+              f"segments) written after the last sidecar flush -- they will be re-fetched",
+              flush=True)
+        with open(done_path, "w") as fh:
+            for rec in keep:
+                fh.write(json.dumps(rec) + "\n")
+    done = {r["relpath"] for r in keep}
     cands = [c for c in cands if c[0] not in done]
     print(f"{len(cands)} videos to process ({len(done)} already done)", flush=True)
 
@@ -426,7 +477,60 @@ def main():
             return np.load(p, mmap_mode="r+")
         return np.lib.format.open_memmap(p, mode="w+", dtype=dtype, shape=shape)
 
-    segments = arr("segments.npy", (cap_n, F, S, S, 3), np.uint8)
+    class ShardWriter:
+        """Write segments into fixed-size shards, holding ONE mapping open.
+
+        A single 770 GB mapping accumulates dirty pages across the whole run and
+        leaves writeback entirely to the kernel. This box hard-hung twice under
+        that pattern (journald went silent, local reads timed out at 40-117s, then
+        a silent panic -- nvme_core.io_timeout is infinite here and panic=-1, so an
+        I/O stall wedges forever and reboots without a trace).
+
+        One live shard bounds the dirty set by construction, and each shard is
+        msync'd and unmapped at rollover instead of lingering.
+        """
+
+        def __init__(self, out: Path, shard: int, frames: int, size: int):
+            self.out, self.shard = out, shard
+            self.frames, self.size = frames, size
+            self.i = -1
+            self.a = None
+
+        def path(self, i):
+            return self.out / f"segments_{i:05d}.npy"
+
+        def _open(self, i):
+            self.close()
+            p = self.path(i)
+            if p.exists():
+                self.a = np.load(p, mmap_mode="r+")
+            else:
+                self.a = np.lib.format.open_memmap(
+                    p, mode="w+", dtype=np.uint8,
+                    shape=(self.shard, self.frames, self.size, self.size, 3))
+            self.i = i
+
+        def close(self):
+            if self.a is not None:
+                self.a.flush()
+                del self.a
+                self.a = None
+                self.i = -1
+
+        def write(self, start, block):
+            """Write `block` at global segment offset `start`, splitting on shard
+            boundaries. Returns nothing; raises only on programmer error."""
+            off = 0
+            while off < len(block):
+                gi = start + off
+                si, so = divmod(gi, self.shard)
+                if si != self.i:
+                    self._open(si)
+                take = min(len(block) - off, self.shard - so)
+                self.a[so:so + take] = block[off:off + take]
+                off += take
+
+    segments = ShardWriter(args.out, args.shard_segments, F, S)
     action_seqs = arr("action_seqs.npy", (cap_n, F), np.uint8)
     keys_a = arr("keys.npy", (cap_n, F, len(KEYS)), np.uint8)
     mouse_a = arr("mouse.npy", (cap_n, F, 2), np.float16)
@@ -446,7 +550,7 @@ def main():
             k = len(segs)
             if w + k > cap_n:
                 break
-            segments[w:w + k] = segs
+            segments.write(w, segs)
             action_seqs[w:w + k] = acts
             keys_a[w:w + k] = ks
             mouse_a[w:w + k] = ms
@@ -460,6 +564,11 @@ def main():
             dh.write(json.dumps({"relpath": relpath, "chunks": int(k)}) + "\n")
             dh.flush()
             if n_ok % 200 == 0:
+                # msync everything, so dirty pages are bounded by the flush
+                # interval rather than left entirely to kernel writeback
+                for _m in (action_seqs, keys_a, mouse_a, pose_a, gui_a):
+                    _m.flush()
+                segments.close()
                 flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail)
             if n_ok % 25 == 0:
                 el = time.time() - t0
@@ -467,7 +576,8 @@ def main():
                 print(f"{n_ok} videos ok / {n_fail} failed | {w} segs "
                       f"({w*F/1e6:.2f}M frames, {gb:.1f} GB) | "
                       f"{n_ok/el*3600:.0f} vid/h | "
-                      f"free root {free_gb('/'):.0f}G out {free_gb(args.out):.0f}G",
+                      f"root {free_gb('/'):.0f}G out {free_gb(args.out):.0f}G | "
+                      f"{mem_snapshot()}",
                       flush=True)
                 stop = disk_guard(args.out, args.min_root_gb, args.min_out_gb)
                 if stop:
@@ -475,8 +585,12 @@ def main():
                     flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail)
                     break
 
+    segments.close()
+    for _m in (action_seqs, keys_a, mouse_a, pose_a, gui_a):
+        _m.flush()
     flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail, complete=True)
     meta = dict(n_segments=w, capacity=int(cap_n), frames=F, size=S, complete=True,
+                shard_size=args.shard_segments,
                 n_records=n_ok, per_record=args.chunks_per_video,
                 n_actions=N_ACTIONS, hud_row=HUD_ROW, source="vpt",
                 subsets=args.subsets, keys=KEYS,

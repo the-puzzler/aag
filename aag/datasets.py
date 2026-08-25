@@ -48,6 +48,69 @@ def spec(dataset: str) -> dict:
     return SPECS[dataset]
 
 
+class ShardedSegments:
+    """Read-only view over segments_00000.npy, segments_00001.npy, ... as one array.
+
+    The VPT builder writes shards rather than a single file: a lone 770 GB mapping
+    accumulates dirty pages for the whole run and left this box hard-hanging twice,
+    whereas one live shard bounds the dirty set. Reading is unaffected either way
+    (clean mapped pages are freely reclaimable), so this exists purely so the
+    loaders below do not care which layout they were given.
+
+    Shards are mmapped lazily on first touch and cached, so a loader that only
+    visits part of the dataset never maps the rest.
+    """
+
+    def __init__(self, root: str, shard_size: int):
+        import glob
+        import numpy as np
+        self._paths = sorted(glob.glob(f"{root}/segments_[0-9]*.npy"))
+        if not self._paths:
+            raise FileNotFoundError(f"no segment shards under {root}")
+        self._shard = int(shard_size)
+        self._open: dict = {}
+        last = np.load(self._paths[-1], mmap_mode="r")
+        self._tail = last.shape
+        self.shape = (self._shard * (len(self._paths) - 1) + last.shape[0],) + last.shape[1:]
+        self.dtype = last.dtype
+
+    def _get(self, si: int):
+        a = self._open.get(si)
+        if a is None:
+            import numpy as np
+            a = np.load(self._paths[si], mmap_mode="r")
+            self._open[si] = a
+        return a
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, key):
+        # only the access patterns the loaders use: seg[j] and seg[c, f]
+        if isinstance(key, tuple):
+            j, rest = key[0], key[1:]
+            si, so = divmod(int(j), self._shard)
+            return self._get(si)[(so,) + rest]
+        si, so = divmod(int(key), self._shard)
+        return self._get(si)[so]
+
+
+def open_segments(root: str):
+    """Single-file cache if present, else the sharded layout."""
+    import json
+    import os
+    import numpy as np
+    single = f"{root}/segments.npy"
+    if os.path.exists(single):
+        return np.load(single, mmap_mode="r")
+    shard = 8192
+    try:
+        shard = int(json.load(open(f"{root}/meta.json")).get("shard_size", shard))
+    except Exception:
+        pass
+    return ShardedSegments(root, shard)
+
+
 class VideoSegments(torch.utils.data.Dataset):
     """uint8 segment cache -> (3,T,H,W) float in [-1,1], plus class label.
 
@@ -58,7 +121,7 @@ class VideoSegments(torch.utils.data.Dataset):
 
     def __init__(self, root: str, indices=None):
         import numpy as np
-        self.segs = np.load(f"{root}/segments.npy", mmap_mode="r")   # (N,T,H,W,3)
+        self.segs = open_segments(root)                              # (N,T,H,W,3)
         self.labels = np.load(f"{root}/labels.npy")
         self.idx = np.arange(len(self.labels)) if indices is None else indices
 
@@ -82,7 +145,7 @@ class DoomFrames(torch.utils.data.Dataset):
 
     def __init__(self, root: str, stride: int = 4, indices=None):
         import numpy as np
-        self.segs = np.load(f"{root}/segments.npy", mmap_mode="r")   # (N,T,H,W,3)
+        self.segs = open_segments(root)                              # (N,T,H,W,3)
         self.acts = np.load(f"{root}/action_seqs.npy")               # (N,T)
         n_valid = len(np.load(f"{root}/labels.npy"))                 # capacity may exceed this
         self.f_idx = np.arange(0, self.segs.shape[1], stride)
