@@ -16,9 +16,13 @@ Design choices, all measured against the data rather than assumed:
     at 324, which is the health bar.  Rows 331-335 are the hotbar (ratio 0.37).
     So the HUD starts at 321 and HUD_ROW = 320.  Cutting at 324 -- the hotbar
     edge alone -- leaves a visible sliver of hearts in every cached frame.
-  * 5.1% of ticks have isGuiOpen (inventory/crafting overlays the world).  Any
-    chunk containing one is skipped -- a world model should not be asked to
-    render inventory screens.
+  * isGuiOpen chunks are KEPT by default.  Skipping them was the original
+    behaviour and it was wrong to impose: measured over 25 episodes, 9.3% of
+    ticks have a GUI open but 15.4% of 80-frame slots contain at least one,
+    because opens come in bursts (median 3.4s, p90 12s).  Discarding a sixth of
+    the data is a dataset decision, so --skip-gui-chunks makes it explicit and
+    off by default.  gui.npy records the flag per frame, so the same filtering
+    can be applied at training time, reversibly.
   * FEW chunks from MANY videos, not many from few.  One video is one
     independent episode, and it is episode-level N that bounds usable latent
     dim -- the UCF-101 lesson (87,953 segments from 9,537 clips).  Download is
@@ -43,7 +47,7 @@ kept in the side arrays instead.  Those side arrays (keys/mouse/pose/gui) cost
 from __future__ import annotations
 
 import argparse, json, os, random, shutil, sys, time, zlib
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -143,7 +147,7 @@ def process_one(job):
     Runs in a worker process; the parent does all cache writing so segments stay
     contiguous (aag/datasets.py takes len(labels) as the valid prefix).
     """
-    relpath, basedir, tmpdir, k_chunks, frames, size, seed = job
+    relpath, basedir, tmpdir, k_chunks, frames, size, seed, skip_gui = job
     tmp = Path(tmpdir)
     mp4 = tmp / (relpath.replace("/", "_"))
     jsonl = mp4.with_suffix(".jsonl")
@@ -179,10 +183,21 @@ def process_one(job):
 
         gui_flag = np.array([1 if r.get("isGuiOpen") else 0 for r in recs[:n]], np.uint8)
 
-        # aligned candidate offsets spread across the episode, GUI-free only
+        # Aligned candidate offsets spread across the episode.
+        #
+        # skip_gui defaults OFF. It was ON, silently: rejecting any chunk holding
+        # a single isGuiOpen tick. Measured on 25 episodes, that discards 15.4% of
+        # 80-frame slots -- 1.7x the 9.3% tick rate, because GUI opens come in
+        # bursts (median 3.4s) so one burst kills a whole window. Excluding a
+        # sixth of the data is a dataset decision, not an implementation detail,
+        # so the flag exists and the default keeps everything. gui.npy is recorded
+        # per frame either way, so filtering can happen at training time instead.
         n_slots = n // frames
-        cands = [i * frames for i in range(n_slots)
-                 if not gui_flag[i * frames:(i + 1) * frames].any()]
+        if skip_gui:
+            cands = [i * frames for i in range(n_slots)
+                     if not gui_flag[i * frames:(i + 1) * frames].any()]
+        else:
+            cands = [i * frames for i in range(n_slots)]
         if not cands:
             cap.release()
             return relpath, None
@@ -303,6 +318,45 @@ def disk_guard(out_path, min_root_gb=8.0, min_out_gb=25.0):
     return None
 
 
+def bounded_results(jobs, ex, inflight):
+    """Yield process_one results with at most `inflight` futures alive.
+
+    The previous version submitted every job at once and held the futures in a
+    dict for the whole run:
+
+        futs = {ex.submit(process_one, j): j[0] for j in jobs}
+        for fut in as_completed(futs): ...
+
+    A Future keeps a reference to its result, and that dict kept every Future
+    alive, so each ~29 MB segments array was retained for the entire run. The
+    parent reached 87 GB RSS (AnonPages 90 GB of 130 GB) after ~57 min and was
+    still climbing -- killing it dropped AnonPages to 1.9 GB. This is almost
+    certainly what wedged the box twice: memory filled, the machine went into
+    heavy reclaim, journald stopped, local reads began timing out, and it
+    panicked silently.
+
+    Here futures are submitted in a sliding window and dropped once consumed, so
+    retained results are bounded by `inflight` rather than by the run length.
+    """
+    it = iter(jobs)
+    pending = set()
+    for _ in range(inflight):
+        j = next(it, None)
+        if j is None:
+            break
+        pending.add(ex.submit(process_one, j))
+    while pending:
+        finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+        for f in finished:
+            out = f.result()
+            j = next(it, None)
+            if j is not None:
+                pending.add(ex.submit(process_one, j))
+            yield out
+            out = None
+        finished = None
+
+
 def flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail, complete=False):
     """Write labels/clip_ids/chunk_idx + meta, replacing atomically.
 
@@ -320,6 +374,8 @@ def flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail, complete=
         os.replace(t, args.out / (name + ".npy"))
     meta = dict(n_segments=w, frames=args.frames, size=args.size,
                 shard_size=args.shard_segments,
+                skip_gui_chunks=args.skip_gui_chunks,
+                gui_filtered_before=args.gui_filtered_before,
                 n_records=n_ok, per_record=args.chunks_per_video,
                 n_actions=N_ACTIONS, hud_row=HUD_ROW, source="vpt",
                 subsets=args.subsets, keys=KEYS, complete=complete,
@@ -359,6 +415,19 @@ def main():
                     help="fraction of n_total*chunks to preallocate; observed yield "
                          "is ~0.79 (82%% of videos resolve, ~96%% of chunks kept)")
     ap.add_argument("--min-root-gb", type=float, default=8.0)
+    ap.add_argument("--inflight", type=int, default=0,
+                    help="max futures alive at once (0 = workers*2). Bounds "
+                         "retained results: submitting all jobs up front held "
+                         "every ~29MB result for the whole run and took the "
+                         "parent to 87GB RSS")
+    ap.add_argument("--gui-filtered-before", type=int, default=0,
+                    help="provenance only: segments below this index were built "
+                         "with --skip-gui-chunks in effect, so the cache is mixed")
+    ap.add_argument("--skip-gui-chunks", action="store_true",
+                    help="reject any chunk containing an isGuiOpen frame. OFF by "
+                         "default: it discards 15.4%% of slots (measured), which is "
+                         "a dataset decision. gui.npy is recorded regardless, so "
+                         "filter at training time instead")
     ap.add_argument("--shard-segments", type=int, default=8192,
                     help="segments per shard file; one shard mapping is live at a "
                          "time, which bounds the dirty page set (8192 x 80 frames "
@@ -554,20 +623,23 @@ def main():
     pose_a = arr("pose.npy", (cap_n, F, 5), np.float32)
     gui_a = arr("gui.npy", (cap_n, F), np.uint8)
     t0 = time.time()
-    jobs = [(r, b, str(args.tmp), args.chunks_per_video, F, S, args.seed)
-            for r, b in cands]
+    jobs = [(r, b, str(args.tmp), args.chunks_per_video, F, S, args.seed,
+             args.skip_gui_chunks) for r, b in cands]
     # NOT a `with` block: on an exception in the consume loop, __exit__ runs
     # shutdown(wait=True), which waits for every queued job. That turned one
     # broadcast error into six minutes of workers downloading at 149 MB/s and
     # discarding the results, with the traceback withheld until the whole queue
     # drained. Shut down with cancel_futures instead, and surface the error now.
+    if args.inflight <= 0:
+        args.inflight = args.workers * 2
+    print(f"inflight window: {args.inflight} futures "
+          f"(~{args.inflight * args.chunks_per_video * F * S * S * 3 / 1e9:.1f} GB "
+          f"of results retained at most)", flush=True)
     ex = ProcessPoolExecutor(max_workers=args.workers)
     fatal = None
     with open(done_path, "a") as dh:
       try:
-          futs = {ex.submit(process_one, j): j[0] for j in jobs}
-          for fut in as_completed(futs):
-              relpath, res = fut.result()
+          for relpath, res in bounded_results(jobs, ex, args.inflight):
               if res is None:
                   n_fail += 1
                   continue
@@ -623,6 +695,8 @@ def main():
     flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail, complete=True)
     meta = dict(n_segments=w, capacity=int(cap_n), frames=F, size=S, complete=True,
                 shard_size=args.shard_segments,
+                skip_gui_chunks=args.skip_gui_chunks,
+                gui_filtered_before=args.gui_filtered_before,
                 n_records=n_ok, per_record=args.chunks_per_video,
                 n_actions=N_ACTIONS, hud_row=HUD_ROW, source="vpt",
                 subsets=args.subsets, keys=KEYS,
