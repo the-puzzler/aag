@@ -502,12 +502,29 @@ def main():
         def _open(self, i):
             self.close()
             p = self.path(i)
+            full = (self.shard, self.frames, self.size, self.size, 3)
             if p.exists():
-                self.a = np.load(p, mmap_mode="r+")
+                a = np.load(p, mmap_mode="r+")
+                if a.shape[0] < self.shard:
+                    # A partially-filled tail shard, e.g. the last one written by
+                    # shard_vpt_cache.py, which sizes it to the valid prefix. It
+                    # must be grown to full size before we can append into it --
+                    # otherwise the write lands on an EMPTY slice and numpy raises
+                    # a broadcast error deep in the parent loop.
+                    print(f"growing shard {i:05d}: {a.shape[0]} -> {self.shard}",
+                          flush=True)
+                    keep = np.array(a)
+                    del a
+                    b = np.lib.format.open_memmap(p, mode="w+", dtype=np.uint8,
+                                                  shape=full)
+                    b[:len(keep)] = keep
+                    b.flush()
+                    del b, keep
+                    a = np.load(p, mmap_mode="r+")
+                self.a = a
             else:
-                self.a = np.lib.format.open_memmap(
-                    p, mode="w+", dtype=np.uint8,
-                    shape=(self.shard, self.frames, self.size, self.size, 3))
+                self.a = np.lib.format.open_memmap(p, mode="w+", dtype=np.uint8,
+                                                   shape=full)
             self.i = i
 
         def close(self):
@@ -539,51 +556,66 @@ def main():
     t0 = time.time()
     jobs = [(r, b, str(args.tmp), args.chunks_per_video, F, S, args.seed)
             for r, b in cands]
-    with ProcessPoolExecutor(max_workers=args.workers) as ex, open(done_path, "a") as dh:
-        futs = {ex.submit(process_one, j): j[0] for j in jobs}
-        for fut in as_completed(futs):
-            relpath, res = fut.result()
-            if res is None:
-                n_fail += 1
-                continue
-            segs, acts, labs, ks, ms, ps, gi, picks = res
-            k = len(segs)
-            if w + k > cap_n:
-                break
-            segments.write(w, segs)
-            action_seqs[w:w + k] = acts
-            keys_a[w:w + k] = ks
-            mouse_a[w:w + k] = ms
-            pose_a[w:w + k] = ps
-            gui_a[w:w + k] = gi
-            labels.extend(labs.tolist())
-            clip_ids.extend([n_ok] * k)                   # one id per EPISODE
-            chunk_idx.extend((picks // F).tolist())
-            w += k
-            n_ok += 1
-            dh.write(json.dumps({"relpath": relpath, "chunks": int(k)}) + "\n")
-            dh.flush()
-            if n_ok % 200 == 0:
-                # msync everything, so dirty pages are bounded by the flush
-                # interval rather than left entirely to kernel writeback
-                for _m in (action_seqs, keys_a, mouse_a, pose_a, gui_a):
-                    _m.flush()
-                segments.close()
-                flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail)
-            if n_ok % 25 == 0:
-                el = time.time() - t0
-                gb = w * F * S * S * 3 / 1e9
-                print(f"{n_ok} videos ok / {n_fail} failed | {w} segs "
-                      f"({w*F/1e6:.2f}M frames, {gb:.1f} GB) | "
-                      f"{n_ok/el*3600:.0f} vid/h | "
-                      f"root {free_gb('/'):.0f}G out {free_gb(args.out):.0f}G | "
-                      f"{mem_snapshot()}",
-                      flush=True)
-                stop = disk_guard(args.out, args.min_root_gb, args.min_out_gb)
-                if stop:
-                    print(f"DISK GUARD: {stop}", flush=True)
-                    flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail)
-                    break
+    # NOT a `with` block: on an exception in the consume loop, __exit__ runs
+    # shutdown(wait=True), which waits for every queued job. That turned one
+    # broadcast error into six minutes of workers downloading at 149 MB/s and
+    # discarding the results, with the traceback withheld until the whole queue
+    # drained. Shut down with cancel_futures instead, and surface the error now.
+    ex = ProcessPoolExecutor(max_workers=args.workers)
+    fatal = None
+    with open(done_path, "a") as dh:
+      try:
+          futs = {ex.submit(process_one, j): j[0] for j in jobs}
+          for fut in as_completed(futs):
+              relpath, res = fut.result()
+              if res is None:
+                  n_fail += 1
+                  continue
+              segs, acts, labs, ks, ms, ps, gi, picks = res
+              k = len(segs)
+              if w + k > cap_n:
+                  break
+              segments.write(w, segs)
+              action_seqs[w:w + k] = acts
+              keys_a[w:w + k] = ks
+              mouse_a[w:w + k] = ms
+              pose_a[w:w + k] = ps
+              gui_a[w:w + k] = gi
+              labels.extend(labs.tolist())
+              clip_ids.extend([n_ok] * k)                   # one id per EPISODE
+              chunk_idx.extend((picks // F).tolist())
+              w += k
+              n_ok += 1
+              dh.write(json.dumps({"relpath": relpath, "chunks": int(k)}) + "\n")
+              dh.flush()
+              if n_ok % 200 == 0:
+                  # msync everything, so dirty pages are bounded by the flush
+                  # interval rather than left entirely to kernel writeback
+                  for _m in (action_seqs, keys_a, mouse_a, pose_a, gui_a):
+                      _m.flush()
+                  segments.close()
+                  flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail)
+              if n_ok % 25 == 0:
+                  el = time.time() - t0
+                  gb = w * F * S * S * 3 / 1e9
+                  print(f"{n_ok} videos ok / {n_fail} failed | {w} segs "
+                        f"({w*F/1e6:.2f}M frames, {gb:.1f} GB) | "
+                        f"{n_ok/el*3600:.0f} vid/h | "
+                        f"root {free_gb('/'):.0f}G out {free_gb(args.out):.0f}G | "
+                        f"{mem_snapshot()}",
+                        flush=True)
+                  stop = disk_guard(args.out, args.min_root_gb, args.min_out_gb)
+                  if stop:
+                      print(f"DISK GUARD: {stop}", flush=True)
+                      flush_sidecars(args, labels, clip_ids, chunk_idx, w, n_ok, n_fail)
+                      break
+      except BaseException as e:                       # noqa: BLE001
+        import traceback
+        fatal = e
+        print("FATAL in consume loop -- cancelling queued work so it does not "
+              "keep downloading:", flush=True)
+        traceback.print_exc()
+    ex.shutdown(wait=False, cancel_futures=True)
 
     segments.close()
     for _m in (action_seqs, keys_a, mouse_a, pose_a, gui_a):
@@ -600,6 +632,8 @@ def main():
     print(json.dumps(meta, indent=2))
     print(f"\n{w} segments = {w*F/1e6:.2f}M frames from {n_ok} episodes "
           f"({n_fail} videos failed)", flush=True)
+    if fatal is not None:
+        raise fatal
 
 
 if __name__ == "__main__":
