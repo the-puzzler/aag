@@ -65,7 +65,7 @@ def test_metrics(ae, loader, device, perceptual):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", choices=["celeba","cifar10","doom","doom_frames"], default="celeba")
-    ap.add_argument("--arch", choices=["residual", "spatial", "hybrid"], default="residual")
+    ap.add_argument("--arch", choices=["residual", "spatial", "hybrid", "dcae"], default="residual")
     ap.add_argument("--dim", type=int, default=64)
     ap.add_argument("--ch", type=int, default=64)
     ap.add_argument("--image-size", type=int, default=64)
@@ -78,6 +78,11 @@ def main():
     ap.add_argument("--data", default="/data/hf_cache")
     ap.add_argument("--out", type=Path, default=Path("results_celeba"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--loader-workers", type=int, default=4,
+                    help="DataLoader workers. The default 4 starves the GPU on the "
+                         "sharded VPT cache: each frame is a separate ~12KB random "
+                         "read, so queue depth 4 gave only ~900 IOPS and GPU util "
+                         "averaged 13% (bursts to 100%, then long stalls)")
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--t-out", type=int, default=4,
                      help="video only: temporal size of the spatial latent grid")
@@ -89,7 +94,9 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.out.mkdir(parents=True, exist_ok=True)
 
-    train_loader, _, test_loader, n_avail = get_loaders(args.dataset, args.data, args.batch, n_particles=1, image_size=args.image_size)
+    train_loader, _, test_loader, n_avail = get_loaders(
+        args.dataset, args.data, args.batch, n_particles=1,
+        workers=args.loader_workers, image_size=args.image_size)
     print(f"AE trains on {n_avail} {args.dataset} samples at {args.image_size}x{args.image_size}, "
           f"arch={args.arch}, lpips_weight={args.lpips_weight}, topk_frac={args.topk_frac}", flush=True)
 

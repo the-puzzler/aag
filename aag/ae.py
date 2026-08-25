@@ -219,6 +219,50 @@ class SpatialResidualUpBlock(nn.Module):
         return self.act(self.main(x) + skip)
 
 
+class DCAEUpBlock(nn.Module):
+    """Upsample block with DC-AE Residual Autoencoding (arXiv 2410.10733).
+
+    SpatialResidualUpBlock uses a LEARNED 1x1 projection for its skip. DC-AE
+    instead makes the identity path parameter-free, so the convolutions only have
+    to learn the correction rather than the whole mapping -- the paper's stated
+    fix for "the optimization difficulty of high spatial-compression
+    autoencoders", which at 192x compression is exactly our regime.
+
+    Their upsample shortcut is channel-to-space with channel DUPLICATION:
+    H/2 x W/2 x 2C  -> pixel_shuffle -> H x W x C/2, duplicated and concatenated
+    to H x W x C. Implemented here as tile-then-shuffle, which is the same thing
+    and generalises when the channel counts are not an exact factor of two --
+    matching how SpatialResidualUpBlock3d in this file already does it.
+
+    The encoder side needs no change: SpatialResidualDownBlock.skip is already
+    parameter-free space-to-depth with channel averaging, which is DC-AE's
+    downsample shortcut.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1),
+            nn.SiLU(),
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1),
+        )
+        self.need = out_channels * 4          # what pixel_shuffle(2) consumes
+        self.act = nn.SiLU()
+
+    def skip(self, x: torch.Tensor) -> torch.Tensor:
+        c = x.shape[1]
+        if c < self.need:                     # duplicate
+            reps = -(-self.need // c)
+            x = x.repeat(1, reps, 1, 1)[:, :self.need]
+        elif c > self.need:                   # average groups
+            x = x.view(x.shape[0], self.need, c // self.need, *x.shape[2:]).mean(2)
+        return nn.functional.pixel_shuffle(x, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.main(x) + self.skip(x))
+
+
 class SpatialResidualEncoder(nn.Module):
     """image_size x image_size encoder whose flat code retains a 4x4 spatial
     organization. The stem does one stride-2 halving; additional halvings
@@ -280,6 +324,23 @@ class SpatialResidualDecoder(nn.Module):
         return torch.tanh(self.net(z))
 
 
+class DCAEDecoder(SpatialResidualDecoder):
+    """SpatialResidualDecoder with DC-AE parameter-free upsample shortcuts."""
+
+    def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
+                 width_mult: int = 2):
+        super().__init__(latent_channels, ch, image_size, width_mult)
+        swapped = []
+        for m in self.net:
+            if isinstance(m, SpatialResidualUpBlock):
+                i = m.main[1].in_channels
+                o = m.main[1].out_channels
+                swapped.append(DCAEUpBlock(i, o))
+            else:
+                swapped.append(m)
+        self.net = nn.Sequential(*swapped)
+
+
 class AutoEncoder(nn.Module):
     def __init__(self, latent_dim: int, ch: int = 64, architecture: str = "plain",
                 image_size: int = 32):
@@ -300,6 +361,15 @@ class AutoEncoder(nn.Module):
             latent_channels = latent_dim // 16
             self.enc = SpatialResidualEncoder(latent_channels, ch, image_size)
             self.dec = SpatialResidualDecoder(latent_channels, ch, image_size)
+        elif architecture == "dcae":
+            # DC-AE (arXiv 2410.10733) residual autoencoding: same spatial grid
+            # bottleneck as 'hybrid', but the decoder's upsample skips are
+            # parameter-free channel-to-space instead of learned 1x1 convs.
+            if latent_dim % 16:
+                raise ValueError("dcae architecture requires latent_dim divisible by 16")
+            latent_channels = latent_dim // 16
+            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size, width_mult=4)
+            self.dec = DCAEDecoder(latent_channels, ch, image_size, width_mult=4)
         elif architecture == "hybrid":
             # spatial's structure-preserving 4x4 grid bottleneck, widened to
             # residual's channel capacity (ch*4 instead of spatial's ch*2) --
@@ -312,7 +382,7 @@ class AutoEncoder(nn.Module):
         else:
             raise ValueError(
                 f"unknown autoencoder architecture {architecture!r}; "
-                "expected 'plain', 'residual', 'spatial', or 'hybrid'"
+                "expected 'plain', 'residual', 'spatial', 'hybrid', or 'dcae'"
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
