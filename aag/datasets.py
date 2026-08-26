@@ -175,7 +175,13 @@ def _doom_frame_loaders(root: str, batch: int, n_particles: int, workers: int = 
     t_idx = perm[min(n_particles, n):][:4096]            # never overlaps particles
     particles = DoomFrames(root, stride, p_idx)
     test = DoomFrames(root, stride, t_idx if len(t_idx) else p_idx[:1024])
-    return (DataLoader(full, batch, shuffle=True, num_workers=workers, pin_memory=True),
+    # drop_last on TRAIN only: torch.compile specialises on the batch shape, so a
+    # short final batch would trigger a recompile every epoch. particles/test keep
+    # every sample -- particles because order IS identity, test because dropping
+    # samples would change the metric.
+    return (DataLoader(full, batch, shuffle=True, num_workers=workers, pin_memory=True,
+                       drop_last=True, persistent_workers=workers > 0,
+                       prefetch_factor=4 if workers else None),
             DataLoader(particles, batch, shuffle=False, num_workers=workers),
             DataLoader(test, batch, shuffle=False, num_workers=workers), n)
 

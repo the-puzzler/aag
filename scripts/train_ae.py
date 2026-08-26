@@ -7,6 +7,7 @@ when training our own AE (encoder+decoder jointly) from scratch."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 from pathlib import Path
@@ -79,6 +80,14 @@ def main():
     ap.add_argument("--data", default="/data/hf_cache")
     ap.add_argument("--out", type=Path, default=Path("results_celeba"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--amp", action="store_true",
+                    help="bf16 autocast for the AE forward and the LPIPS term. bf16 "
+                         "not fp16: no GradScaler needed and the tanh output stays "
+                         "well within range")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the AE. Needs a fixed batch shape, so the "
+                         "loader must drop_last, else every partial batch triggers "
+                         "a recompile")
     ap.add_argument("--loader-workers", type=int, default=4,
                     help="DataLoader workers. The default 4 starves the GPU on the "
                          "sharded VPT cache: each frame is a separate ~12KB random "
@@ -123,6 +132,14 @@ def main():
         print(f"resumed weights from {args.resume} (was epoch {rk.get('epochs')}, "
               f"test_mse={rk.get('test_mse')})", flush=True)
 
+    if args.compile:
+        ae = torch.compile(ae)
+        print("torch.compile enabled (first steps pay compilation)", flush=True)
+    amp_ctx = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if args.amp \
+        else (lambda: contextlib.nullcontext())
+    if args.amp:
+        print("bf16 autocast enabled", flush=True)
+
     perceptual = lpips.LPIPS(net="vgg").to(device).eval()
     for p in perceptual.parameters():
         p.requires_grad_(False)
@@ -138,18 +155,19 @@ def main():
         for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
-            xr = ae(x)
-            mse_full = F.mse_loss(xr, x)
-            mse_train = topk_mse(xr, x, args.topk_frac)
-            if args.lpips_weight > 0:
-                perc = _lpips_any(perceptual, xr.clamp(-1, 1), x).mean()
-                loss = mse_train + args.lpips_weight * perc
-            else:
-                # skip the VGG pass entirely -- it is the dominant per-step cost.
-                # test_lpips is still measured at every eval, so checkpoint
-                # selection and cross-run comparison stay intact.
-                perc = None
-                loss = mse_train
+            with amp_ctx():
+                xr = ae(x)
+                mse_full = F.mse_loss(xr, x)
+                mse_train = topk_mse(xr, x, args.topk_frac)
+                if args.lpips_weight > 0:
+                    perc = _lpips_any(perceptual, xr.clamp(-1, 1), x).mean()
+                    loss = mse_train + args.lpips_weight * perc
+                else:
+                    # skip the VGG pass entirely -- it is the dominant per-step
+                    # cost. test_lpips is still measured at every eval, so
+                    # checkpoint selection and cross-run comparison stay intact.
+                    perc = None
+                    loss = mse_train
             loss.backward()
             opt.step()
             sched.step()
