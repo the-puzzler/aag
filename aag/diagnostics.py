@@ -339,6 +339,79 @@ def r_cond(z, h, cond, *, n_probes=800, k=32, m_cond=4096, gen=None, chunk=128):
     return float((torch.cat(out) / hs).median())
 
 
+def action_dist_knn_w2(z, cond, act_vec, *, k, k_act, n_eval=20, gen=None, n_dirs=16):
+    """Diagnostic matching action_dist_knn_transport_step: action-nearest-k_act,
+    then context-nearest-k inside it. Pair with random_subset_w2 at the same k
+    and report the RATIO -> 1.0.
+    """
+    import torch
+    from .gaussianize import _gaussian_quantiles
+    scores = []
+    for _ in range(n_eval):
+        qi = int(torch.randint(z.shape[0], (1,), device=z.device, generator=gen))
+        ad = torch.cdist(act_vec[qi:qi + 1], act_vec).squeeze(0)
+        ka = min(k_act, z.shape[0])
+        near = torch.topk(ad, ka, largest=False).indices
+        cd = torch.cdist(cond[qi:qi + 1], cond[near]).squeeze(0)
+        kk = min(k, near.numel())
+        idx = near[torch.topk(cd, kk, largest=False).indices]
+        zs = z[idx]
+        dirs = torch.randn(n_dirs, z.shape[1], device=z.device, generator=gen)
+        dirs = dirs / dirs.norm(dim=1, keepdim=True)
+        srt, _ = torch.sort(zs @ dirs.T, dim=0)
+        q = _gaussian_quantiles(kk, z.device, z.dtype).unsqueeze(1)
+        scores.append(((srt - q) ** 2).mean(0).max().item())
+    return sum(scores) / len(scores)
+
+
+def per_action_w2(z, action_ids, *, n_eval_per=4, gen=None, n_dirs=16, min_size=256,
+                  max_group=4096, floor_reps=8):
+    """Max-projected W2 per DISCRETE action class, against a SIZE-MATCHED floor.
+
+    Returns {action_id: (ratio, size, w2, floor)}.
+
+    The size match is the whole point and easy to get wrong: dividing every class
+    by a floor computed at one fixed k makes small classes look dependent purely
+    from finite-sample W2. Measured here, that error inflated the mean ratio from
+    2.46 to 4.98 and the max from 6.50 to 13.81, and it reordered which actions
+    looked worst -- the apparent worst two (n~300) were fine once matched, while
+    the real worst were mid-sized classes.
+    """
+    import torch
+    from .gaussianize import _gaussian_quantiles
+    out = {}
+    for a in torch.unique(action_ids).tolist():
+        member = (action_ids == a).nonzero(as_tuple=True)[0]
+        if member.numel() < min_size:
+            continue
+        vals = []
+        for _ in range(n_eval_per):
+            sel = member
+            if sel.numel() > max_group:
+                perm = torch.randperm(sel.numel(), device=z.device, generator=gen)
+                sel = sel[perm[:max_group]]
+            zs = z[sel]
+            dirs = torch.randn(n_dirs, z.shape[1], device=z.device, generator=gen)
+            dirs = dirs / dirs.norm(dim=1, keepdim=True)
+            srt, _ = torch.sort(zs @ dirs.T, dim=0)
+            q = _gaussian_quantiles(len(zs), z.device, z.dtype).unsqueeze(1)
+            vals.append(((srt - q) ** 2).mean(0).max().item())
+        cls = sum(vals) / len(vals)
+        n = min(int(member.numel()), max_group)
+        fl = []
+        for _ in range(floor_reps):
+            sel = torch.randperm(z.shape[0], device=z.device, generator=gen)[:n]
+            zs = z[sel]
+            dirs = torch.randn(n_dirs, z.shape[1], device=z.device, generator=gen)
+            dirs = dirs / dirs.norm(dim=1, keepdim=True)
+            srt, _ = torch.sort(zs @ dirs.T, dim=0)
+            q = _gaussian_quantiles(n, z.device, z.dtype).unsqueeze(1)
+            fl.append(((srt - q) ** 2).mean(0).max().item())
+        floor = sum(fl) / len(fl)
+        out[a] = (cls / max(floor, 1e-12), int(member.numel()), cls, floor)
+    return out
+
+
 def random_subset_w2(z, *, k, n_eval=20, gen=None, n_dirs=16):
     """Same statistic on RANDOM subsets of matched size = the independence floor.
 

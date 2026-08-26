@@ -234,6 +234,52 @@ def action_knn_transport_step(z, cond, action_ids, *, k, n_dirs, alpha, gen):
     return float(scores[best])
 
 
+def action_dist_knn_transport_step(z, cond, act_vec, *, k, k_act, n_dirs, alpha, gen):
+    """Conditional transport with a DISTANCE on the action too, not an exact group.
+
+    action_knn_transport_step filters to the sampled particle's exact action id.
+    That works when actions are a small clean categorical (Doom's 18). The VPT
+    action is movement x turn x pitch where turn/pitch are sign-with-deadzone, so
+    an exact match throws away mouse MAGNITUDE -- and magnitude explains more of
+    the frame-to-frame change than every key combined (16.4% vs 2.1% of variance).
+
+    So: take the k_act nearest neighbours in continuous ACTION space, then the k
+    nearest in continuous CONTEXT space within them, then rank-transport that
+    subset. Two nested nearest-k rather than one blended metric, because AE latent
+    units and mouse pixels have no common scale -- a blend needs a weight that
+    cannot be derived, whereas nested k's only need group sizes.
+
+    act_vec must be pre-transformed (signed log1p + standardised) or the raw mouse
+    range dominates: measured, dx alone is 81% of raw L2 variance and the key bits
+    are ~0%.
+    """
+    N, d = z.shape
+    qi = int(torch.randint(N, (1,), device=z.device, generator=gen))
+    k_act = min(k_act, N)
+    adist = torch.cdist(act_vec[qi:qi + 1], act_vec).squeeze(0)
+    near_a = torch.topk(adist, k_act, largest=False).indices
+    if near_a.numel() < 64:
+        return 0.0
+
+    cdist = torch.cdist(cond[qi:qi + 1], cond[near_a]).squeeze(0)
+    kk = min(k, near_a.numel())
+    idx = near_a[torch.topk(cdist, kk, largest=False).indices]
+    zs = z[idx]
+
+    dirs = _rand_unit(n_dirs, d, z.device, z.dtype)
+    s, _ = torch.sort(zs @ dirs.T, dim=0)
+    q = _gaussian_quantiles(kk, z.device, z.dtype).unsqueeze(1)
+    scores = ((s - q) ** 2).mean(0)
+    best = int(torch.argmax(scores))
+    a = dirs[best]
+
+    proj = zs @ a
+    target = torch.empty_like(proj)
+    target[torch.argsort(proj)] = _gaussian_quantiles(kk, z.device, z.dtype)
+    z[idx] = zs + alpha * (target - proj).unsqueeze(1) * a.unsqueeze(0)
+    return float(scores[best])
+
+
 # --------------------------------------------------------------------------- #
 # 1.2c  discrete-group conditional rank transport
 # --------------------------------------------------------------------------- #
