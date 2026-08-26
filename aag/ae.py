@@ -219,6 +219,38 @@ class SpatialResidualUpBlock(nn.Module):
         return self.act(self.main(x) + skip)
 
 
+class DCAEDownBlock(nn.Module):
+    """SpatialResidualDownBlock plus GroupNorm, for the dcae path.
+
+    The skip is already DC-AE's parameter-free space-to-depth with channel
+    averaging; only the norm is added. Kept separate from
+    SpatialResidualDownBlock so 'hybrid' and 'spatial' remain exactly as
+    published.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        skip_channels = in_channels * 4
+        if skip_channels % out_channels:
+            raise ValueError(f"cannot group {skip_channels} skip channels into {out_channels}")
+        self.out_channels = out_channels
+        self.main = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 2, 1),
+            nn.GroupNorm(min(8, out_channels), out_channels), nn.SiLU(),
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1),
+            nn.GroupNorm(min(8, out_channels), out_channels),
+        )
+        self.act = nn.SiLU()
+
+    def skip(self, x: torch.Tensor) -> torch.Tensor:
+        x = nn.functional.pixel_unshuffle(x, 2)
+        b, c, h, w = x.shape
+        return x.view(b, self.out_channels, c // self.out_channels, h, w).mean(2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.main(x) + self.skip(x))
+
+
 class DCAEUpBlock(nn.Module):
     """Upsample block with DC-AE Residual Autoencoding (arXiv 2410.10733).
 
@@ -241,11 +273,17 @@ class DCAEUpBlock(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
+        # GroupNorm is load-bearing here, exactly as the 3D blocks document.
+        # SpatialResidualUpBlock's learned 1x1 skip can scale magnitude DOWN; the
+        # parameter-free tile-and-shuffle cannot, so three stacked blocks at
+        # ch=112 grew activations until the decoder's tanh saturated at 100% and
+        # the gradient went to exactly zero at epoch 3.
         self.main = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="nearest"),
             nn.Conv2d(in_channels, out_channels, 3, 1, 1),
-            nn.SiLU(),
+            nn.GroupNorm(min(8, out_channels), out_channels), nn.SiLU(),
             nn.Conv2d(out_channels, out_channels, 3, 1, 1),
+            nn.GroupNorm(min(8, out_channels), out_channels),
         )
         self.need = out_channels * 4          # what pixel_shuffle(2) consumes
         self.act = nn.SiLU()
@@ -324,6 +362,19 @@ class SpatialResidualDecoder(nn.Module):
         return torch.tanh(self.net(z))
 
 
+class DCAEEncoder(SpatialResidualEncoder):
+    """SpatialResidualEncoder with GroupNorm'd DC-AE down blocks."""
+
+    def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
+                 width_mult: int = 2):
+        super().__init__(latent_channels, ch, image_size, width_mult)
+        self.features = nn.Sequential(*[
+            DCAEDownBlock(m.main[0].in_channels, m.out_channels)
+            if isinstance(m, SpatialResidualDownBlock) else m
+            for m in self.features
+        ])
+
+
 class DCAEDecoder(SpatialResidualDecoder):
     """SpatialResidualDecoder with DC-AE parameter-free upsample shortcuts."""
 
@@ -368,7 +419,7 @@ class AutoEncoder(nn.Module):
             if latent_dim % 16:
                 raise ValueError("dcae architecture requires latent_dim divisible by 16")
             latent_channels = latent_dim // 16
-            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size, width_mult=4)
+            self.enc = DCAEEncoder(latent_channels, ch, image_size, width_mult=4)
             self.dec = DCAEDecoder(latent_channels, ch, image_size, width_mult=4)
         elif architecture == "hybrid":
             # spatial's structure-preserving 4x4 grid bottleneck, widened to

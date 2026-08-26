@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import lpips
@@ -179,6 +180,24 @@ def main():
                 "t_out": args.t_out, "frames": spec(args.dataset).get("frames"),
             }, str(_p) + ".tmp")
             Path(str(_p) + ".tmp").replace(_p)  # atomic: never leaves a truncated file at the real path
+
+            # Divergence guard. A dcae run at ch=112 saturated its decoder tanh
+            # at epoch 3, froze at a constant output with gradient norm exactly
+            # 0, and then burned 17 more epochs printing identical numbers. Abort
+            # instead: nothing after a dead gradient is recoverable.
+            hist = curve["test_mse"]
+            if not math.isfinite(tm):
+                print(f"DIVERGED: test_mse is {tm} at epoch {ep+1} -- aborting", flush=True)
+                break
+            best_so_far = min(hist)
+            if len(hist) >= 2 and tm > 3.0 * best_so_far:
+                print(f"DIVERGED: test_mse {tm:.5f} is >3x the best {best_so_far:.5f} "
+                      f"at epoch {ep+1} -- aborting", flush=True)
+                break
+            if len(hist) >= 3 and len(set(f"{v:.7f}" for v in hist[-3:])) == 1:
+                print(f"FROZEN: test_mse identical for 3 epochs ({tm:.5f}) at epoch "
+                      f"{ep+1} -- gradient is probably dead, aborting", flush=True)
+                break
         else:
             print(f"[{args.arch}] epoch {ep+1}/{args.epochs}  train_mse={running_mse/n:.5f} "
                   f"train_lpips={running_lpips/n:.5f}", flush=True)
