@@ -191,8 +191,13 @@ def main():
             tag = f"_topk{args.topk_frac}" if args.topk_frac < 1.0 else ""
             ckpt_path = ckpt_dir / f"ae_{args.dataset}_{args.arch}_lpips_ch{args.ch}_dim{args.dim}{tag}_ep{ep+1}.pt"
             _p = ckpt_path
+            # torch.compile wraps the module, so ae.state_dict() prefixes every
+            # key with "_orig_mod." and a plain AutoEncoder cannot load it. Save
+            # the unwrapped weights so checkpoints stay portable to the particle
+            # builder, the generator and any later run without --compile.
+            sd = (ae._orig_mod if hasattr(ae, "_orig_mod") else ae).state_dict()
             torch.save({
-                "model_state_dict": ae.state_dict(), "latent_dim": args.dim,
+                "model_state_dict": sd, "latent_dim": args.dim,
                 "channels": args.ch, "architecture": args.arch, "image_size": args.image_size,
                 "epochs": ep + 1, "test_mse": tm, "test_lpips": tl, "seed": args.seed,
                 "t_out": args.t_out, "frames": spec(args.dataset).get("frames"),
