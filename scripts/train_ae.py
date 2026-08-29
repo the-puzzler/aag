@@ -102,6 +102,14 @@ def main():
     ap.add_argument("--dim", type=int, default=64)
     ap.add_argument("--ch", type=int, default=64)
     ap.add_argument("--image-size", type=int, default=64)
+    ap.add_argument("--grid", type=int, default=4,
+                    help="Spatial size of the latent grid. Default 4: at 64x64 each "
+                         "cell owns a 16x16 pixel region, which is exactly where the "
+                         "small-object regression measured on our models collapses "
+                         "to ~1%%. grid=8 halves that to 8x8 per cell. Note it also "
+                         "removes one down/up block, so match --ch to keep the "
+                         "parameter count comparable (grid 8 needs ch 304 to match "
+                         "grid 4 at ch 192).")
     ap.add_argument("--lpips-weight", type=float, default=0.5)
     ap.add_argument("--topk-add-frac", type=float, default=0.0,
                     help="If >0, ADD a top-k MSE term over this fraction of the "
@@ -175,7 +183,8 @@ def main():
         workers=args.loader_workers, image_size=args.image_size)
     print(f"AE trains on {n_avail} {args.dataset} samples at {args.image_size}x{args.image_size}, "
           f"arch={args.arch}, lpips_weight={args.lpips_weight}, topk_frac={args.topk_frac}, "
-          f"topk_add_frac={args.topk_add_frac}, topk_add_weight={args.topk_add_weight}", flush=True)
+          f"topk_add_frac={args.topk_add_frac}, topk_add_weight={args.topk_add_weight}, "
+          f"grid={args.grid}x{args.grid}", flush=True)
 
     VIDEO = spec(args.dataset).get("video", False)
     if VIDEO:
@@ -189,7 +198,7 @@ def main():
                               width_mult=v_wm).to(device)
     else:
         ae = AutoEncoder(args.dim, ch=args.ch, architecture=args.arch,
-                         image_size=args.image_size).to(device)
+                         image_size=args.image_size, grid=args.grid).to(device)
     n_params = sum(p.numel() for p in ae.parameters())
     print(f"model params: {n_params:,}", flush=True)
 
@@ -325,6 +334,7 @@ def main():
             torch.save({
                 "model_state_dict": sd, "latent_dim": args.dim,
                 "channels": args.ch, "architecture": args.arch, "image_size": args.image_size,
+                "grid": args.grid,
                 "epochs": ep + 1, "test_mse": tm, "test_lpips": tl, "seed": args.seed,
                 "topk_add_frac": args.topk_add_frac, "topk_add_weight": args.topk_add_weight,
                 "gan_weight": args.gan_weight, "gan_head_modules": args.gan_head_modules,

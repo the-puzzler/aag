@@ -308,16 +308,17 @@ class SpatialResidualEncoder(nn.Module):
     so image_size=32 reproduces the original CIFAR architecture exactly."""
 
     def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
-                width_mult: int = 2):
+                width_mult: int = 2, grid: int = 4):
         super().__init__()
-        n_down = (image_size // 4).bit_length() - 1
-        if 4 << n_down != image_size:
-            raise ValueError(f"image_size must be a power of two >= 8, got {image_size}")
+        n_down = (image_size // grid).bit_length() - 1
+        if grid << n_down != image_size:
+            raise ValueError(f"image_size must be grid x a power of two, got "
+                             f"image_size={image_size}, grid={grid}")
         n_blocks = n_down - 1  # halvings after the stem's own halving
         out_ch = [ch * width_mult] * (n_blocks - 1) + [latent_channels]
         in_ch = [ch] + out_ch[:-1]
 
-        self.latent_channels = latent_channels
+        self.latent_channels, self.grid = latent_channels, grid
         self.stem = nn.Sequential(
             nn.Conv2d(3, ch, 4, 2, 1),                  # image_size/2
             nn.SiLU(),
@@ -339,18 +340,19 @@ class SpatialResidualDecoder(nn.Module):
     mirroring SpatialResidualEncoder for any supported image_size."""
 
     def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
-                width_mult: int = 2):
+                width_mult: int = 2, grid: int = 4):
         super().__init__()
-        n_down = (image_size // 4).bit_length() - 1
-        if 4 << n_down != image_size:
-            raise ValueError(f"image_size must be a power of two >= 8, got {image_size}")
+        n_down = (image_size // grid).bit_length() - 1
+        if grid << n_down != image_size:
+            raise ValueError(f"image_size must be grid x a power of two, got "
+                             f"image_size={image_size}, grid={grid}")
         n_blocks = n_down - 1
         enc_out_ch = [ch * width_mult] * (n_blocks - 1) + [latent_channels]
         enc_in_ch = [ch] + enc_out_ch[:-1]
         dec_out_ch = list(reversed(enc_in_ch))
         dec_in_ch = [latent_channels] + dec_out_ch[:-1]
 
-        self.latent_channels = latent_channels
+        self.latent_channels, self.grid = latent_channels, grid
         self.net = nn.Sequential(
             *(SpatialResidualUpBlock(i, o) for i, o in zip(dec_in_ch, dec_out_ch)),
             nn.Upsample(scale_factor=2, mode="nearest"),
@@ -358,7 +360,7 @@ class SpatialResidualDecoder(nn.Module):
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        z = z.view(z.shape[0], self.latent_channels, 4, 4)
+        z = z.view(z.shape[0], self.latent_channels, self.grid, self.grid)
         return torch.tanh(self.net(z))
 
 
@@ -366,8 +368,8 @@ class DCAEEncoder(SpatialResidualEncoder):
     """SpatialResidualEncoder with GroupNorm'd DC-AE down blocks."""
 
     def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
-                 width_mult: int = 2):
-        super().__init__(latent_channels, ch, image_size, width_mult)
+                 width_mult: int = 2, grid: int = 4):
+        super().__init__(latent_channels, ch, image_size, width_mult, grid)
         self.features = nn.Sequential(*[
             DCAEDownBlock(m.main[0].in_channels, m.out_channels)
             if isinstance(m, SpatialResidualDownBlock) else m
@@ -379,8 +381,8 @@ class DCAEDecoder(SpatialResidualDecoder):
     """SpatialResidualDecoder with DC-AE parameter-free upsample shortcuts."""
 
     def __init__(self, latent_channels: int, ch: int = 64, image_size: int = 32,
-                 width_mult: int = 2):
-        super().__init__(latent_channels, ch, image_size, width_mult)
+                 width_mult: int = 2, grid: int = 4):
+        super().__init__(latent_channels, ch, image_size, width_mult, grid)
         swapped = []
         for m in self.net:
             if isinstance(m, SpatialResidualUpBlock):
@@ -394,10 +396,12 @@ class DCAEDecoder(SpatialResidualDecoder):
 
 class AutoEncoder(nn.Module):
     def __init__(self, latent_dim: int, ch: int = 64, architecture: str = "plain",
-                image_size: int = 32):
+                image_size: int = 32, grid: int = 4):
         super().__init__()
         self.latent_dim = latent_dim
         self.architecture = architecture
+        self.grid = grid
+        cells = grid * grid
         if architecture == "plain" and image_size != 32:
             raise ValueError("architecture='plain' assumes image_size=32")
         if architecture == "plain":
@@ -407,29 +411,34 @@ class AutoEncoder(nn.Module):
             self.enc = ResidualEncoder(latent_dim, ch, image_size)
             self.dec = ResidualDecoder(latent_dim, ch, image_size)
         elif architecture == "spatial":
-            if latent_dim % 16:
-                raise ValueError("spatial architecture requires latent_dim divisible by 16")
-            latent_channels = latent_dim // 16
-            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size)
-            self.dec = SpatialResidualDecoder(latent_channels, ch, image_size)
+            if latent_dim % cells:
+                raise ValueError(f"spatial architecture requires latent_dim divisible "
+                                 f"by grid^2 = {cells}")
+            latent_channels = latent_dim // cells
+            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size, grid=grid)
+            self.dec = SpatialResidualDecoder(latent_channels, ch, image_size, grid=grid)
         elif architecture == "dcae":
             # DC-AE (arXiv 2410.10733) residual autoencoding: same spatial grid
             # bottleneck as 'hybrid', but the decoder's upsample skips are
             # parameter-free channel-to-space instead of learned 1x1 convs.
-            if latent_dim % 16:
-                raise ValueError("dcae architecture requires latent_dim divisible by 16")
-            latent_channels = latent_dim // 16
-            self.enc = DCAEEncoder(latent_channels, ch, image_size, width_mult=4)
-            self.dec = DCAEDecoder(latent_channels, ch, image_size, width_mult=4)
+            if latent_dim % cells:
+                raise ValueError(f"dcae architecture requires latent_dim divisible "
+                                 f"by grid^2 = {cells}")
+            latent_channels = latent_dim // cells
+            self.enc = DCAEEncoder(latent_channels, ch, image_size, width_mult=4, grid=grid)
+            self.dec = DCAEDecoder(latent_channels, ch, image_size, width_mult=4, grid=grid)
         elif architecture == "hybrid":
             # spatial's structure-preserving 4x4 grid bottleneck, widened to
             # residual's channel capacity (ch*4 instead of spatial's ch*2) --
             # tests whether the two levers combine for mutual benefit.
-            if latent_dim % 16:
-                raise ValueError("hybrid architecture requires latent_dim divisible by 16")
-            latent_channels = latent_dim // 16
-            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size, width_mult=4)
-            self.dec = SpatialResidualDecoder(latent_channels, ch, image_size, width_mult=4)
+            if latent_dim % cells:
+                raise ValueError(f"hybrid architecture requires latent_dim divisible "
+                                 f"by grid^2 = {cells}")
+            latent_channels = latent_dim // cells
+            self.enc = SpatialResidualEncoder(latent_channels, ch, image_size,
+                                              width_mult=4, grid=grid)
+            self.dec = SpatialResidualDecoder(latent_channels, ch, image_size,
+                                              width_mult=4, grid=grid)
         else:
             raise ValueError(
                 f"unknown autoencoder architecture {architecture!r}; "
