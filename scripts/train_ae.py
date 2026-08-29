@@ -46,6 +46,11 @@ def topk_mse(pred, target, frac):
     return topk_vals.mean()
 
 
+def hard_str(running_hard, n):
+    """Report the added top-k term only when it is switched on."""
+    return f" train_hard={running_hard / n:.5f}" if running_hard else ""
+
+
 def test_metrics(ae, loader, device, perceptual):
     ae.eval()
     total_mse, total_lpips, count, n_lpips = 0.0, 0.0, 0, 0
@@ -72,6 +77,17 @@ def main():
     ap.add_argument("--ch", type=int, default=64)
     ap.add_argument("--image-size", type=int, default=64)
     ap.add_argument("--lpips-weight", type=float, default=0.5)
+    ap.add_argument("--topk-add-frac", type=float, default=0.0,
+                    help="If >0, ADD a top-k MSE term over this fraction of the "
+                         "hardest elements, on top of the full-mean MSE (unlike "
+                         "--topk-frac, which replaces it). At weight 1.0 the mean "
+                         "term spreads one unit of gradient mass over all 12288 "
+                         "elements while this term spreads one unit over the worst "
+                         "0.5%, so the hardest pixels carry gradient mass equal to "
+                         "every other pixel combined. Counters high-frequency "
+                         "detail being numerically swamped by the low-frequency "
+                         "bulk it is averaged against.")
+    ap.add_argument("--topk-add-weight", type=float, default=1.0)
     ap.add_argument("--topk-frac", type=float, default=1.0,
                      help="fraction of highest-error elements per sample to backprop MSE on (1.0 = plain MSE)")
     ap.add_argument("--epochs", type=int, default=40)
@@ -108,7 +124,8 @@ def main():
         args.dataset, args.data, args.batch, n_particles=1,
         workers=args.loader_workers, image_size=args.image_size)
     print(f"AE trains on {n_avail} {args.dataset} samples at {args.image_size}x{args.image_size}, "
-          f"arch={args.arch}, lpips_weight={args.lpips_weight}, topk_frac={args.topk_frac}", flush=True)
+          f"arch={args.arch}, lpips_weight={args.lpips_weight}, topk_frac={args.topk_frac}, "
+          f"topk_add_frac={args.topk_add_frac}, topk_add_weight={args.topk_add_weight}", flush=True)
 
     VIDEO = spec(args.dataset).get("video", False)
     if VIDEO:
@@ -151,7 +168,7 @@ def main():
              "test_epoch": [], "test_mse": [], "test_lpips": [], "arch": args.arch}
     ae.train()
     for ep in range(args.epochs):
-        running_mse, running_lpips, n = 0.0, 0.0, 0
+        running_mse, running_lpips, running_hard, n = 0.0, 0.0, 0.0, 0
         for x, _ in train_loader:
             x = x.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
@@ -159,6 +176,10 @@ def main():
                 xr = ae(x)
                 mse_full = F.mse_loss(xr, x)
                 mse_train = topk_mse(xr, x, args.topk_frac)
+                if args.topk_add_frac > 0:
+                    hard = topk_mse(xr, x, args.topk_add_frac)
+                    mse_train = mse_train + args.topk_add_weight * hard
+                    running_hard += hard.item() * x.size(0)
                 if args.lpips_weight > 0:
                     perc = _lpips_any(perceptual, xr.clamp(-1, 1), x).mean()
                     loss = mse_train + args.lpips_weight * perc
@@ -184,7 +205,8 @@ def main():
             curve["test_mse"].append(tm)
             curve["test_lpips"].append(tl)
             print(f"[{args.arch}] epoch {ep+1}/{args.epochs}  train_mse={running_mse/n:.5f} "
-                  f"train_lpips={running_lpips/n:.5f}  test_mse={tm:.5f} test_lpips={tl:.5f}",
+                  f"train_lpips={running_lpips/n:.5f}{hard_str(running_hard, n)}  "
+                  f"test_mse={tm:.5f} test_lpips={tl:.5f}",
                   flush=True)
             ckpt_dir = args.out / "checkpoints"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -200,6 +222,7 @@ def main():
                 "model_state_dict": sd, "latent_dim": args.dim,
                 "channels": args.ch, "architecture": args.arch, "image_size": args.image_size,
                 "epochs": ep + 1, "test_mse": tm, "test_lpips": tl, "seed": args.seed,
+                "topk_add_frac": args.topk_add_frac, "topk_add_weight": args.topk_add_weight,
                 "t_out": args.t_out, "frames": spec(args.dataset).get("frames"),
             }, str(_p) + ".tmp")
             Path(str(_p) + ".tmp").replace(_p)  # atomic: never leaves a truncated file at the real path
@@ -223,7 +246,7 @@ def main():
                 break
         else:
             print(f"[{args.arch}] epoch {ep+1}/{args.epochs}  train_mse={running_mse/n:.5f} "
-                  f"train_lpips={running_lpips/n:.5f}", flush=True)
+                  f"train_lpips={running_lpips/n:.5f}{hard_str(running_hard, n)}", flush=True)
 
     best_i = min(range(len(curve["test_lpips"])), key=lambda i: curve["test_lpips"][i])
     best_epoch, best_lpips = curve["test_epoch"][best_i], curve["test_lpips"][best_i]
