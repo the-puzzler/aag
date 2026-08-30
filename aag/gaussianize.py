@@ -194,6 +194,61 @@ def continuous_knn_transport_step(z, cond, *, k, n_dirs, alpha, gen, metric="cos
     return float(scores.max())
 
 
+def continuous_knn_transport_batch(z, cond, *, k, n_dirs, alpha, gen, n_fire,
+                                   metric="cosine", qis=None):
+    """n_fire firings of continuous_knn_transport_step, one pass over `cond`.
+
+    Identical in result to calling that function n_fire times: same query
+    distribution, same neighbourhoods, same sequential updates to z. The only
+    change is WHEN the distances are computed.
+
+    It is worth doing because cond never changes -- only z does -- so the
+    per-firing distance pass was re-reading a static 12.6 GB tensor. At 112
+    firings per step that is 1.4 TB of memory traffic per step, which measured
+    at 6.5 s/step and would have been ~90 hours at 1.66M particles. Computing
+    all n_fire distance rows in one pass makes it one read instead of n_fire.
+
+    Neighbour selection is hoisted (it depends only on cond); the transports
+    still run one at a time against the live z, so this is not a Jacobi
+    relaxation of the original -- it is the original.
+
+    Note the queries are drawn as one batch rather than one per firing, so for a
+    given seed the DRAWS differ from the loop even though the distribution and
+    the algorithm do not. Pass `qis` to pin them (used by the equivalence test).
+    """
+    N, d = z.shape
+    if qis is None:                       # qis is injectable so the equivalence
+        qis = torch.randint(N, (n_fire,), device=z.device, generator=gen)
+    k = min(k, N)
+    q = cond[qis]
+    if metric == "cosine":
+        qn = q / q.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        cn = cond / cond.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        dist = 1.0 - qn @ cn.T
+    elif metric == "l2":
+        dist = torch.cdist(q, cond)
+    else:
+        raise ValueError(f"unknown metric {metric!r}")
+    idxs = torch.topk(dist, k, largest=False, dim=1).indices      # (n_fire, k)
+    del dist
+
+    qg = _gaussian_quantiles(k, z.device, z.dtype)
+    total = 0.0
+    for b in range(n_fire):
+        idx = idxs[b]
+        zs = z[idx]
+        dirs = _rand_unit(n_dirs, d, z.device, z.dtype)
+        s, _ = torch.sort(zs @ dirs.T, dim=0)
+        scores = ((s - qg.unsqueeze(1)) ** 2).mean(0)
+        a = dirs[int(torch.argmax(scores))]
+        proj = zs @ a
+        target = torch.empty_like(proj)
+        target[torch.argsort(proj)] = qg
+        z[idx] = zs + alpha * (target - proj).unsqueeze(1) * a.unsqueeze(0)
+        total += float(scores.max())
+    return total / max(n_fire, 1)
+
+
 # --------------------------------------------------------------------------- #
 # 1.2d  hybrid: exact discrete group + continuous k-NN inside it
 # --------------------------------------------------------------------------- #

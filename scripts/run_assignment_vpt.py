@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from aag.gaussianize import (whiten, greedy_rank_transport_step,
+from aag.gaussianize import (continuous_knn_transport_batch, whiten, greedy_rank_transport_step,
                              continuous_knn_transport_step,
                              action_dist_knn_transport_step)
 from aag.diagnostics import (random_subset_w2, continuous_knn_w2,
@@ -43,6 +43,11 @@ ap.add_argument("--eval-k", type=int, default=2048)
 ap.add_argument("--eval-every", type=int, default=250)
 ap.add_argument("--out", required=True)
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--save-every", type=int, default=0,
+                help="If >0, write the assignment every N steps as well as at the "
+                     "end. A long run that only saves on completion loses "
+                     "everything to a crash, and cannot be stopped early to take "
+                     "what it has.")
 a = ap.parse_args()
 
 dev = "cuda"
@@ -79,9 +84,11 @@ def gdefect(t):
 for step in range(1, a.steps + 1):
     greedy_rank_transport_step(z, search_subset=a.search_subset, n_dirs=a.n_dirs,
                                alpha=a.alpha, gen=gen)
-    for _ in range(a.ctx_per_step):
-        continuous_knn_transport_step(z, cond, k=a.k, n_dirs=a.n_dirs,
-                                      alpha=a.cond_alpha, gen=gen, metric="l2")
+    # one pass over cond for all ctx firings instead of one per firing --
+    # bit-identical, and cond is 12.6 GB at 512k particles
+    continuous_knn_transport_batch(z, cond, k=a.k, n_dirs=a.n_dirs,
+                                   alpha=a.cond_alpha, gen=gen,
+                                   n_fire=a.ctx_per_step, metric="l2")
     for _ in range(a.act_per_step):
         action_dist_knn_transport_step(z, cond, av, k=a.k, k_act=a.k_act,
                                        n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen)
@@ -99,6 +106,22 @@ for step in range(1, a.steps + 1):
               f"I_ctx={ctx/max(floor,1e-12):.3f}  I_act={actw/max(floor,1e-12):.3f}",
               flush=True)
 
+    if a.save_every and step % a.save_every == 0 and step < a.steps:
+        _p = Path(a.out); _p.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
+                    "chunk": P.get("chunk"), "frame": P.get("frame"),
+                    "episode": P.get("episode"), "cache": P.get("cache"),
+                    "ae_checkpoint": P.get("checkpoint"),
+                    "action_vec": av.cpu(), "mean": mean.cpu(), "W": W.cpu(),
+                    "W_inv": W_inv.cpu(), "curve": curve, "per_action": None,
+                    "steps": step, "k": a.k, "k_act": a.k_act,
+                    "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
+                    "cond_alpha": a.cond_alpha, "context": P["context"],
+                    "gamma": P["gamma"], "particles": a.particles,
+                    "partial": True}, str(_p) + ".tmp")
+        Path(str(_p) + ".tmp").replace(_p)   # atomic: never a truncated file
+        print(f"  [checkpoint at step {step}]", flush=True)
+
 pa = per_action_w2(z, act, gen=gen)
 floor = random_subset_w2(z, k=a.eval_k, n_eval=40, gen=gen)
 rows = sorted(((r, k, n) for k, (r, n, _, _) in pa.items()), reverse=True)
@@ -112,7 +135,12 @@ print(f"  corr(log n, ratio) {np.corrcoef(np.log(ns), rs)[0,1]:+.2f} "
 
 out = Path(a.out)
 out.parent.mkdir(parents=True, exist_ok=True)
+# the assignment permutes nothing -- row i of z is still particle i -- so the
+# cache coordinates carry through unchanged, and the generator can index frames
 torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
+            "chunk": P.get("chunk"), "frame": P.get("frame"),
+            "episode": P.get("episode"), "cache": P.get("cache"),
+            "ae_checkpoint": P.get("checkpoint"),
             "action_vec": av.cpu(), "mean": mean.cpu(), "W": W.cpu(), "W_inv": W_inv.cpu(),
             "curve": curve, "per_action": pa,
             "steps": a.steps, "k": a.k, "k_act": a.k_act,

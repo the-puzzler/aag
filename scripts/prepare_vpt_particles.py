@@ -101,6 +101,12 @@ def main():
 
     n_chunks = n_valid if args.limit_chunks is None else min(n_valid, args.limit_chunks)
     rng = np.random.default_rng(args.seed)
+    # Which chunks, not just how many. The cache is written in download order
+    # across four separate VPT index files, so taking a prefix would quietly
+    # weight the particle set toward whichever contractor batches were fetched
+    # first. Sample the subset instead; reading is random-access either way.
+    chunk_ids = (np.arange(n_valid) if n_chunks == n_valid
+                 else np.sort(rng.choice(n_valid, size=n_chunks, replace=False)))
     print(f"{n_chunks:,} chunks x {args.per_chunk} = "
           f"{n_chunks*args.per_chunk:,} particles, cond_dim {C*dim}", flush=True)
 
@@ -108,10 +114,22 @@ def main():
     print(f"recency weights sqrt(gamma^i): newest {w[-1]:.3f} ... oldest {w[0]:.3f}",
           flush=True)
 
-    H_t, H_c, A_i, A_v, EP = [], [], [], [], []
+    # Preallocate rather than append-then-stack. Accumulating 1.66M separate
+    # (6144,) arrays in a Python list costs per-object overhead on top of the
+    # data, and np.stack then duplicates the whole 40.9 GB block transiently --
+    # measured at 23.5 GB anonymous by 400k particles, projecting to ~139 GB
+    # peak against 124 GB of RAM. Writing into preallocated arrays removes both.
+    N_total = n_chunks * min(args.per_chunk, frames - C)
+    H_t = np.empty((N_total, dim), dtype=np.float32)
+    H_c = np.empty((N_total, C * dim), dtype=np.float32)
+    print(f"preallocated h_target {H_t.nbytes/1e9:.1f} GB + h_context "
+          f"{H_c.nbytes/1e9:.1f} GB for {N_total:,} particles", flush=True)
+    A_i, A_v, EP = [], [], []
+    n_written = 0
     buf_frames, buf_meta = [], []
 
     def flush():
+        nonlocal n_written
         if not buf_frames:
             return
         x = torch.from_numpy(np.concatenate(buf_frames, 0))
@@ -123,15 +141,17 @@ def main():
         for (ci, t, nf) in buf_meta:
             block = h[off:off + nf]
             off += nf
-            H_t.append(block[-1])                                   # target = frame t
+            H_t[n_written] = block[-1]                              # target = frame t
             ctx = block[:-1] * w[:, None]                            # recency-scaled
-            H_c.append(ctx.reshape(-1))
+            H_c[n_written] = ctx.reshape(-1)
+            n_written += 1
             A_i.append(int(acts[ci, t]))
             A_v.append((int(ci), int(t)))
             EP.append(int(clip[ci]))
         buf_frames.clear(); buf_meta.clear()
 
-    for ci in range(n_chunks):
+    for n_done, ci in enumerate(chunk_ids):
+        ci = int(ci)
         ts = rng.choice(np.arange(C, frames), size=min(args.per_chunk, frames - C),
                         replace=False)
         seg = np.asarray(segs[ci])
@@ -141,8 +161,8 @@ def main():
             buf_meta.append((ci, t, C + 1))
         if len(buf_meta) >= 256:
             flush()
-        if ci and ci % 20000 == 0:
-            print(f"  {ci:,}/{n_chunks:,} chunks, {len(H_t):,} particles", flush=True)
+        if n_done and n_done % 20000 == 0:
+            print(f"  {n_done:,}/{n_chunks:,} chunks, {n_written:,} particles", flush=True)
     flush()
 
     kv = np.stack([np.asarray(keys[c, t]) for c, t in A_v])
@@ -150,19 +170,26 @@ def main():
     act_vec = build_action_vec(kv, mv)
 
     out = {
-        "h_target": torch.from_numpy(np.stack(H_t)),
-        "h_context": torch.from_numpy(np.stack(H_c)),
+        # zero-copy views of the preallocated blocks, trimmed to what was filled
+        "h_target": torch.from_numpy(H_t[:n_written]),
+        "h_context": torch.from_numpy(H_c[:n_written]),
         "action": torch.tensor(A_i, dtype=torch.long),
         "action_vec": torch.from_numpy(act_vec.astype(np.float32)),
         "episode": torch.tensor(EP, dtype=torch.long),
+        # (chunk, frame) for every particle, in particle order. The generator
+        # needs these to fetch its pixel targets out of the cache -- without
+        # them a particle file cannot be turned into training data at all.
+        "chunk": torch.tensor([c for c, _ in A_v], dtype=torch.long),
+        "frame": torch.tensor([t for _, t in A_v], dtype=torch.long),
         "dim": dim, "context": C, "gamma": args.gamma,
         "cache": str(R), "checkpoint": str(args.checkpoint),
         "n_segments_snapshot": int(n_valid),      # freeze: order IS identity
+        "chunk_ids": torch.from_numpy(chunk_ids),  # which chunks were sampled
         "mouse_weight": MOUSE_W, "key_cols": KEY_COLS,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, args.out)
-    print(f"\nsaved {len(H_t):,} particles -> {args.out}")
+    print(f"\nsaved {n_written:,} particles -> {args.out}")
     print(f"  h_target  {tuple(out['h_target'].shape)}")
     print(f"  h_context {tuple(out['h_context'].shape)}")
     print(f"  action_vec {tuple(out['action_vec'].shape)}  "
