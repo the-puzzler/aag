@@ -161,7 +161,10 @@ def cond_distance(cond, qi, metric="cosine"):
     if metric == "cosine":
         return 1.0 - torch.nn.functional.cosine_similarity(q, cond, dim=1)
     if metric == "l2":
-        return torch.cdist(q, cond).squeeze(0)
+        # not torch.cdist: it materialises cond.pow(2), a second full-size copy.
+        # At 1.66M x 6144 that is another 38 GiB on top of the 38 GiB already
+        # resident and OOMs a 95 GiB card -- which is exactly how this failed.
+        return _l2_to_all(q, cond).squeeze(0).clamp_min_(0).sqrt_()
     raise ValueError(f"unknown metric {metric!r}; expected 'cosine' or 'l2'")
 
 
@@ -192,6 +195,39 @@ def continuous_knn_transport_step(z, cond, *, k, n_dirs, alpha, gen, metric="cos
     target[torch.argsort(proj)] = _gaussian_quantiles(k, z.device, z.dtype)
     z[idx] = zs + alpha * (target - proj).unsqueeze(1) * a.unsqueeze(0)
     return float(scores.max())
+
+
+
+_SQNORM_CACHE = {}
+
+
+def _sq_norms(x, chunk=65536):
+    """Cached row-wise squared norms, computed in chunks.
+
+    torch.cdist internally does x.pow(2).sum(-1), and x.pow(2) materialises a
+    full-size temporary -- a second 38 GiB copy of the conditioning tensor at
+    1.66M particles, which OOMs a 95 GiB card that already holds the original.
+    Chunking avoids the temporary, and caching is free because cond never
+    changes during an assignment: only z does.
+    """
+    key = (x.data_ptr(), x.shape, x.dtype)
+    hit = _SQNORM_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = torch.empty(x.shape[0], device=x.device, dtype=x.dtype)
+    for i in range(0, x.shape[0], chunk):
+        out[i:i + chunk] = x[i:i + chunk].pow(2).sum(1)
+    _SQNORM_CACHE.clear()          # only ever one cond per run; do not leak
+    _SQNORM_CACHE[key] = out
+    return out
+
+
+def _l2_to_all(q, x):
+    """||q - x||^2 for every pair, via the matmul form so no (N, D) temporary
+    is ever allocated. Returns squared distances, which rank identically."""
+    qs = q.pow(2).sum(1, keepdim=True)                 # (B,1) -- q is tiny
+    xs = _sq_norms(x).unsqueeze(0)                     # (1,N) -- cached
+    return (qs + xs - 2.0 * (q @ x.T)).clamp_min_(0)
 
 
 def continuous_knn_transport_batch(z, cond, *, k, n_dirs, alpha, gen, n_fire,
@@ -226,7 +262,7 @@ def continuous_knn_transport_batch(z, cond, *, k, n_dirs, alpha, gen, n_fire,
         cn = cond / cond.norm(dim=1, keepdim=True).clamp_min(1e-12)
         dist = 1.0 - qn @ cn.T
     elif metric == "l2":
-        dist = torch.cdist(q, cond)
+        dist = _l2_to_all(q, cond)          # squared; ranking is unchanged
     else:
         raise ValueError(f"unknown metric {metric!r}")
     idxs = torch.topk(dist, k, largest=False, dim=1).indices      # (n_fire, k)

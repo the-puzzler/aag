@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from aag.gaussianize import (continuous_knn_transport_batch, whiten, greedy_rank_transport_step,
+from aag.gaussianize import (continuous_knn_transport_batch, group_rank_transport_step, whiten, greedy_rank_transport_step,
                              continuous_knn_transport_step,
                              action_dist_knn_transport_step)
 from aag.diagnostics import (random_subset_w2, continuous_knn_w2,
@@ -35,6 +35,17 @@ ap.add_argument("--search-subset", type=int, default=2048)
 ap.add_argument("--n-dirs", type=int, default=64)
 ap.add_argument("--ctx-per-step", type=int, default=8)
 ap.add_argument("--act-per-step", type=int, default=8)
+ap.add_argument("--grp-per-step", type=int, default=0,
+                help="Exact-action-class transport firings per step. The other "
+                     "action step decorrelates z from the CONTINUOUS act_vec, but "
+                     "the generator conditions on a discrete 81-way one-hot -- a "
+                     "different partition. Measured on the 16k run: z sits 2.49x "
+                     "further off-centre within an action class than chance, "
+                     "against 1.03x for context, which is why a fresh z degrades. "
+                     "This transports the true p(z | class).")
+ap.add_argument("--max-group", type=int, default=8192,
+                help="cap per class so one huge class (a0 has 207k members) does "
+                     "not dominate the step cost")
 ap.add_argument("--alpha", type=float, default=1.0)
 ap.add_argument("--cond-alpha", type=float, default=0.25)
 ap.add_argument("--k", type=int, default=2048)
@@ -59,8 +70,10 @@ av = P["action_vec"].to(dev).float()
 N, d = h.shape
 print(f"{N:,} particles  dim={d}  cond_dim={cond.shape[1]}  "
       f"context={P['context']} gamma={P['gamma']}", flush=True)
-print(f"budget: {a.steps} global x ({a.ctx_per_step} ctx + {a.act_per_step} act) "
-      f"= {a.steps*(a.ctx_per_step+a.act_per_step):,} conditional firings", flush=True)
+print(f"budget: {a.steps} global x ({a.ctx_per_step} ctx + {a.act_per_step} act "
+      f"+ {a.grp_per_step} grp) = "
+      f"{a.steps*(a.ctx_per_step+a.act_per_step+a.grp_per_step):,} conditional firings",
+      flush=True)
 print("target: BOTH ratios -> 1.0 (below 1.0 = over-transported)", flush=True)
 
 # rotate=False keeps coordinate j of z meaning coordinate j of h, which matters
@@ -92,6 +105,9 @@ for step in range(1, a.steps + 1):
     for _ in range(a.act_per_step):
         action_dist_knn_transport_step(z, cond, av, k=a.k, k_act=a.k_act,
                                        n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen)
+    for _ in range(a.grp_per_step):
+        group_rank_transport_step(z, act, n_dirs=a.n_dirs, alpha=a.cond_alpha,
+                                  gen=gen, max_group=a.max_group)
 
     if step % a.eval_every == 0 or step == 1:
         floor = random_subset_w2(z, k=a.eval_k, n_eval=20, gen=gen)
@@ -145,6 +161,7 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "curve": curve, "per_action": pa,
             "steps": a.steps, "k": a.k, "k_act": a.k_act,
             "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
-            "cond_alpha": a.cond_alpha, "context": P["context"], "gamma": P["gamma"],
+            "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step,
+            "context": P["context"], "gamma": P["gamma"],
             "particles": a.particles}, out)
 print(f"\nsaved -> {out}")

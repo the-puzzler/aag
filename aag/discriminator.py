@@ -109,3 +109,44 @@ def last_conv_weight(ae):
     """The output convolution's weight -- the reference layer for adaptive_weight."""
     core = ae._orig_mod if hasattr(ae, "_orig_mod") else ae
     return core.dec.net[-1].weight
+
+
+# --------------------------------------------------------------------------- #
+# paired 2-way discriminator
+# --------------------------------------------------------------------------- #
+def paired_batch(real, fake, gen):
+    """Stack each (real, fake) pair on the channel axis in a random order.
+
+    Every generated frame here has an EXACT corresponding real frame -- same z,
+    same context, same action -- so the discriminator can be asked the much
+    better-posed question "which of these two is the true continuation?" rather
+    than judging images independently against a global sense of realism.
+
+    It also means the discriminator needs no conditioning input: the pairing
+    carries it. Feeding it the 6144-d context instead would dwarf the images.
+
+    Returns (B, 6, H, W) and a (B,) label that is 1 where the real frame is
+    first. Order is randomised per sample or the answer is always "the first".
+    """
+    B = real.shape[0]
+    first_is_real = (torch.rand(B, device=real.device, generator=gen) < 0.5)
+    m = first_is_real.view(B, 1, 1, 1)
+    a = torch.where(m, real, fake)
+    b = torch.where(m, fake, real)
+    return torch.cat([a, b], dim=1), first_is_real.float()
+
+
+def paired_d_loss(logits, label):
+    """Discriminator: name which side is real. Patch-wise, so the decision stays
+    local -- every patch votes on the same question."""
+    return F.binary_cross_entropy_with_logits(
+        logits, label.view(-1, 1, 1, 1).expand_as(logits))
+
+
+def paired_g_loss(logits, label):
+    """Generator: make the discriminator answer wrong, i.e. the flipped label.
+    Non-saturating -- as with the standard formulation, minimising BCE against
+    the wrong answer gives a usable gradient when the critic is winning, where
+    maximising its loss directly would not."""
+    return F.binary_cross_entropy_with_logits(
+        logits, (1.0 - label).view(-1, 1, 1, 1).expand_as(logits))

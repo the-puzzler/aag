@@ -18,6 +18,7 @@ Differs from the Doom version in three places, all forced by the VPT cache:
 """
 from __future__ import annotations
 import argparse
+import gc
 import json
 from pathlib import Path
 
@@ -36,6 +37,15 @@ def main():
     ap.add_argument("--assignment", required=True)
     ap.add_argument("--cache", default="/opt/dlami/nvme/vpt_full")
     ap.add_argument("--n-actions", type=int, default=81)
+    ap.add_argument("--act-vec", action="store_true",
+                    help="Append the 9-d continuous action vector to the one-hot. "
+                         "The assignment decorrelates z from act_vec, but a "
+                         "one-hot is a different partition -- measured, z sits "
+                         "2.49x further off-centre within an action CLASS than "
+                         "chance while context is at 1.03x. Conditioning on both "
+                         "lines the generator up with what was actually "
+                         "decorrelated, and keeps the mouse magnitude the one-hot "
+                         "discards.")
     ap.add_argument("--ch", type=int, default=192)
     ap.add_argument("--image-size", type=int, default=64)
     ap.add_argument("--lpips-weight", type=float, default=0.5)
@@ -66,9 +76,25 @@ def main():
     N, dim_z = z.shape
     onehot = torch.zeros(N, args.n_actions)
     onehot[torch.arange(N), act] = 1.0
-    inp = torch.cat([z, cond, onehot], 1).to(dev)
-    print(f"{N:,} particles | generator input dim {inp.shape[1]} "
-          f"(z={dim_z} + cond={cond.shape[1]} + action={args.n_actions})", flush=True)
+    parts = [z, cond, onehot]
+    a_desc = f"action={args.n_actions}"
+    if args.act_vec:
+        av = A.get("action_vec")
+        if av is None:
+            raise SystemExit("--act-vec needs action_vec in the assignment")
+        parts.append(av.float())
+        a_desc += f" + act_vec={av.shape[1]}"
+    inp = torch.cat(parts, 1).to(dev)
+    n_in = inp.shape[1]
+    # Free every CPU copy now the input lives on the GPU. At 1.66M particles
+    # A["cond"] is 40.9 GB and the cat another 43.2 GB; holding both alongside
+    # the 20.4 GB target buffer peaks at 124.9 GB against 124 GB of RAM.
+    del parts, cond
+    for _k in ("cond", "h", "z", "action_vec", "mean", "W", "W_inv"):
+        A.pop(_k, None)
+    gc.collect()
+    print(f"{N:,} particles | generator input dim {n_in} "
+          f"(z={dim_z} + cond=6144 + {a_desc})", flush=True)
     r = A.get("curve", {}).get("ctx_ratio")
     if r:
         print(f"assignment independence: ctx {r[-1]:.3f}  "
@@ -77,7 +103,9 @@ def main():
     # pixel targets: the actual frame each particle points at
     segs = open_segments(args.cache)
     ci, fi = A["chunk"].numpy(), A["frame"].numpy()
-    tgt = torch.empty((N, 3, args.image_size, args.image_size), dtype=torch.uint8)
+    # allocate pinned up front: .pin_memory() afterwards would duplicate 20.4 GB
+    tgt = torch.empty((N, 3, args.image_size, args.image_size), dtype=torch.uint8,
+                      pin_memory=True)
     for s in range(0, N, 4096):
         e = min(s + 4096, N)
         blk = np.stack([np.asarray(segs[int(c)])[int(f)]
@@ -85,10 +113,10 @@ def main():
         tgt[s:e] = torch.from_numpy(blk).permute(0, 3, 1, 2)
         if s % 131072 == 0:
             print(f"  targets {s:,}/{N:,}", flush=True)
-    tgt = tgt.pin_memory()
-    print(f"targets {tuple(tgt.shape)} uint8 ({tgt.nbytes/1e9:.2f} GB, on CPU)", flush=True)
+    print(f"targets {tuple(tgt.shape)} uint8 ({tgt.nbytes/1e9:.2f} GB, pinned on CPU)",
+          flush=True)
 
-    model = ConvDecoder(inp.shape[1], ch=args.ch, image_size=args.image_size).to(dev)
+    model = ConvDecoder(n_in, ch=args.ch, image_size=args.image_size).to(dev)
     if args.resume is not None:
         rk = torch.load(args.resume, map_location=dev, weights_only=False)
         model.load_state_dict(rk["model_state_dict"])
@@ -136,8 +164,9 @@ def main():
             save_image(grid * 0.5 + 0.5, args.out / f"samples_ep{ep+1}.png", nrow=8)
             ck = args.out / "checkpoints"; ck.mkdir(exist_ok=True)
             torch.save({"model_state_dict": model.state_dict(), "epoch": ep + 1,
-                        "input_dim": inp.shape[1], "dim_z": dim_z, "ch": args.ch,
+                        "input_dim": n_in, "dim_z": dim_z, "ch": args.ch,
                         "image_size": args.image_size, "n_actions": args.n_actions,
+                        "act_vec": args.act_vec,
                         "mse": tot_m / n, "lpips": tot_l / n,
                         "assignment": str(args.assignment)},
                        ck / f"gen_vpt_ep{ep+1}.pt")
