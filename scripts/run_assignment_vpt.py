@@ -59,6 +59,19 @@ ap.add_argument("--save-every", type=int, default=0,
                      "end. A long run that only saves on completion loses "
                      "everything to a crash, and cannot be stopped early to take "
                      "what it has.")
+ap.add_argument("--ctx-frames", type=int, default=0,
+                help="Transport against only the newest N of the stored context "
+                     "blocks (0 = all of them). Measured on the 24-frame cosine "
+                     "assignment at n_eval=200: the saved z reaches I_ctx 0.954 "
+                     "against the full weighted context and 0.897 unweighted, "
+                     "but 3.030 against the newest 5 frames and 8.253 against "
+                     "the newest 1. Independence from the whole trajectory is a "
+                     "much weaker condition than independence from where the "
+                     "camera is right now -- two particles sharing a last frame "
+                     "but differing in history sit far apart in 6144-d context "
+                     "space, so they never share a neighbourhood and transport "
+                     "never decorrelates z across them. A one-step predictor "
+                     "needs the latter. Doom, which worked, used 3 frames.")
 ap.add_argument("--ctx-metric", choices=["l2", "cosine"], default="l2",
                 help="Distance defining the CONTEXT neighbourhood. The doom run "
                      "that reached I 0.860 used cosine; VPT has been using l2. "
@@ -82,6 +95,15 @@ import gc
 P = torch.load(a.particles, map_location="cpu", weights_only=False)
 h = P["h_target"].to(dev).float()
 cond = P["h_context"].to(dev).float()
+if a.ctx_frames:
+    _C = int(P["context"])
+    if not 0 < a.ctx_frames <= _C:
+        raise SystemExit(f"--ctx-frames must be in 1..{_C}")
+    # cond is recency-scaled with the newest block at weight 1, so a suffix
+    # slice is exactly what a shorter-context particle build would produce.
+    _blk = cond.shape[1] // _C
+    cond = cond[:, (_C - a.ctx_frames) * _blk:].contiguous()
+    P["context"] = a.ctx_frames
 act = P["action"].to(dev)
 av = P["action_vec"].to(dev).float()
 N, d = h.shape
@@ -210,5 +232,6 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step,
             "ctx_metric": a.ctx_metric,
             "context": P["context"], "gamma": P["gamma"],
+            "ctx_frames": a.ctx_frames,
             "particles": a.particles}, out)
 print(f"\nsaved -> {out}")
