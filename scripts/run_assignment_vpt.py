@@ -59,30 +59,72 @@ ap.add_argument("--save-every", type=int, default=0,
                      "end. A long run that only saves on completion loses "
                      "everything to a crash, and cannot be stopped early to take "
                      "what it has.")
+ap.add_argument("--ctx-metric", choices=["l2", "cosine"], default="l2",
+                help="Distance defining the CONTEXT neighbourhood. The doom run "
+                     "that reached I 0.860 used cosine; VPT has been using l2. "
+                     "cond_distance's rationale: AE latent magnitude tracks "
+                     "brightness/contrast rather than content, so under l2 a "
+                     "neighbourhood groups frames by overall brightness as much "
+                     "as by scene -- and Minecraft spans day, night, caves and "
+                     "biomes. Applied to the eval too: measuring l2 independence "
+                     "while transporting cosine neighbourhoods would be "
+                     "meaningless.")
+ap.add_argument("--resume-z", default=None,
+                help="Continue transport from a saved assignment's z instead of "
+                     "re-whitening from scratch. The 512k run looked plateaued "
+                     "at I_ctx 7.5 around step 5000 and still reached 1.035 by "
+                     "16000, so an apparent plateau is not evidence of a floor "
+                     "-- this makes testing that cheap rather than a restart.")
 a = ap.parse_args()
 
 dev = "cuda"
+import gc
 P = torch.load(a.particles, map_location="cpu", weights_only=False)
 h = P["h_target"].to(dev).float()
 cond = P["h_context"].to(dev).float()
 act = P["action"].to(dev)
 av = P["action_vec"].to(dev).float()
 N, d = h.shape
+# h_context is 40.9 GB at 1.66M particles and is dead once cond is on the GPU.
+# Holding it alongside the GPU copy AND the save-time cond.cpu() copy is what
+# OOM-killed the first 32k attempt -- earlyoom fired at VmRSS 117 GB.
+_keep = {k: P[k] for k in ("chunk", "frame", "episode", "cache", "checkpoint",
+                           "context", "gamma") if k in P}
+P.clear(); P.update(_keep)
+gc.collect()
 print(f"{N:,} particles  dim={d}  cond_dim={cond.shape[1]}  "
-      f"context={P['context']} gamma={P['gamma']}", flush=True)
+      f"context={P['context']} gamma={P['gamma']} ctx_metric={a.ctx_metric}",
+      flush=True)
 print(f"budget: {a.steps} global x ({a.ctx_per_step} ctx + {a.act_per_step} act "
       f"+ {a.grp_per_step} grp) = "
       f"{a.steps*(a.ctx_per_step+a.act_per_step+a.grp_per_step):,} conditional firings",
       flush=True)
-print("target: BOTH ratios -> 1.0 (below 1.0 = over-transported)", flush=True)
+print("NOTE: these ratios do NOT select a good assignment. Audited\n       2026-08-31: the doom assignment that actually won logged\n       joint 1.14 / 1.02 / 0.86 / 1.12 (the last two the SAME step),\n       and VPT's runs live at 0.92-1.17 -- the same regime on a\n       +/-0.13 instrument. The 0.860 and 0.778 figures previously\n       quoted as targets were single noisy evals. Read neighbouring\n       evals before quoting any value, and judge an assignment by the\n       fresh-z MSE of a generator trained on it, which is what the\n       doom run selected on.", flush=True)
 
 # rotate=False keeps coordinate j of z meaning coordinate j of h, which matters
 # for a spatial AE latent whose grid topology a PCA rotation would destroy.
-z, mean, W, W_inv = whiten(h, rotate=False)
-z = z.contiguous()
+step0 = 0
+if a.resume_z:
+    R = torch.load(a.resume_z, map_location="cpu", weights_only=False)
+    if R["z"].shape != h.shape:
+        raise SystemExit(f"resume z is {tuple(R['z'].shape)} but these particles "
+                         f"are {tuple(h.shape)} -- different particle file")
+    z = R["z"].to(dev).float().contiguous()
+    mean = R["mean"].to(dev); W = R["W"].to(dev); W_inv = R["W_inv"].to(dev)
+    step0 = int(R.get("steps", 0))
+    print(f"resumed z from {a.resume_z} at step {step0:,} "
+          f"(I_ctx was {R['curve']['ctx_ratio'][-1]:.3f}, "
+          f"I_act {R['curve']['act_ratio'][-1]:.3f})", flush=True)
+    _curve0 = {k: list(v) for k, v in R["curve"].items()}
+    R.clear(); R["curve"] = _curve0    # its cond/h were a third 40.9 GB copy
+    gc.collect()
+else:
+    z, mean, W, W_inv = whiten(h, rotate=False)
+    z = z.contiguous()
 gen = torch.Generator(device=dev).manual_seed(a.seed)
 
-curve = {"step": [], "ctx_ratio": [], "act_ratio": [], "floor": [], "G": []}
+curve = ({k: list(v) for k, v in R["curve"].items()} if a.resume_z
+         else {"step": [], "ctx_ratio": [], "act_ratio": [], "floor": [], "G": []})
 
 
 def gdefect(t):
@@ -101,7 +143,7 @@ for step in range(1, a.steps + 1):
     # bit-identical, and cond is 12.6 GB at 512k particles
     continuous_knn_transport_batch(z, cond, k=a.k, n_dirs=a.n_dirs,
                                    alpha=a.cond_alpha, gen=gen,
-                                   n_fire=a.ctx_per_step, metric="l2")
+                                   n_fire=a.ctx_per_step, metric=a.ctx_metric)
     for _ in range(a.act_per_step):
         action_dist_knn_transport_step(z, cond, av, k=a.k, k_act=a.k_act,
                                        n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen)
@@ -111,14 +153,16 @@ for step in range(1, a.steps + 1):
 
     if step % a.eval_every == 0 or step == 1:
         floor = random_subset_w2(z, k=a.eval_k, n_eval=20, gen=gen)
-        ctx = continuous_knn_w2(z, cond, k=a.eval_k, n_eval=20, gen=gen, metric="l2")
+        ctx = continuous_knn_w2(z, cond, k=a.eval_k, n_eval=20, gen=gen,
+                                metric=a.ctx_metric)
         actw = action_dist_knn_w2(z, cond, av, k=a.eval_k, k_act=a.k_act,
                                   n_eval=20, gen=gen)
         G = gdefect(z)
-        curve["step"].append(step); curve["floor"].append(floor); curve["G"].append(G)
+        curve["step"].append(step0 + step)
+        curve["floor"].append(floor); curve["G"].append(G)
         curve["ctx_ratio"].append(ctx / max(floor, 1e-12))
         curve["act_ratio"].append(actw / max(floor, 1e-12))
-        print(f"step {step:5d}  G={G:.5f}  floor={floor:.5f}  "
+        print(f"step {step0 + step:5d}  G={G:.5f}  floor={floor:.5f}  "
               f"I_ctx={ctx/max(floor,1e-12):.3f}  I_act={actw/max(floor,1e-12):.3f}",
               flush=True)
 
@@ -130,13 +174,15 @@ for step in range(1, a.steps + 1):
                     "ae_checkpoint": P.get("checkpoint"),
                     "action_vec": av.cpu(), "mean": mean.cpu(), "W": W.cpu(),
                     "W_inv": W_inv.cpu(), "curve": curve, "per_action": None,
-                    "steps": step, "k": a.k, "k_act": a.k_act,
+                    "steps": step0 + step, "k": a.k, "k_act": a.k_act,
                     "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
-                    "cond_alpha": a.cond_alpha, "context": P["context"],
+                    "cond_alpha": a.cond_alpha, "ctx_metric": a.ctx_metric,
+                    "context": P["context"],
                     "gamma": P["gamma"], "particles": a.particles,
                     "partial": True}, str(_p) + ".tmp")
         Path(str(_p) + ".tmp").replace(_p)   # atomic: never a truncated file
-        print(f"  [checkpoint at step {step}]", flush=True)
+        gc.collect()
+        print(f"  [checkpoint at step {step0 + step}]", flush=True)
 
 pa = per_action_w2(z, act, gen=gen)
 floor = random_subset_w2(z, k=a.eval_k, n_eval=40, gen=gen)
@@ -159,9 +205,10 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "ae_checkpoint": P.get("checkpoint"),
             "action_vec": av.cpu(), "mean": mean.cpu(), "W": W.cpu(), "W_inv": W_inv.cpu(),
             "curve": curve, "per_action": pa,
-            "steps": a.steps, "k": a.k, "k_act": a.k_act,
+            "steps": step0 + a.steps, "k": a.k, "k_act": a.k_act,
             "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
             "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step,
+            "ctx_metric": a.ctx_metric,
             "context": P["context"], "gamma": P["gamma"],
             "particles": a.particles}, out)
 print(f"\nsaved -> {out}")

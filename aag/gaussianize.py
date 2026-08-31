@@ -222,6 +222,29 @@ def _sq_norms(x, chunk=65536):
     return out
 
 
+_UNIT_CACHE = {}
+
+
+def _unit(x, chunk=65536):
+    """Cached row-normalised copy of x, built in chunks.
+
+    cosine needs x / ||x|| for every row. Recomputing it per firing allocates a
+    full-size copy each time -- 12.6 GB at 512k particles, 40.9 GB at 1.66M.
+    cond never changes during an assignment, so build it once.
+    """
+    key = (x.data_ptr(), x.shape, x.dtype)
+    hit = _UNIT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = torch.empty_like(x)
+    for i in range(0, x.shape[0], chunk):
+        blk = x[i:i + chunk]
+        out[i:i + chunk] = blk / blk.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    _UNIT_CACHE.clear()
+    _UNIT_CACHE[key] = out
+    return out
+
+
 def _l2_to_all(q, x):
     """||q - x||^2 for every pair, via the matmul form so no (N, D) temporary
     is ever allocated. Returns squared distances, which rank identically."""
@@ -259,8 +282,7 @@ def continuous_knn_transport_batch(z, cond, *, k, n_dirs, alpha, gen, n_fire,
     q = cond[qis]
     if metric == "cosine":
         qn = q / q.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        cn = cond / cond.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        dist = 1.0 - qn @ cn.T
+        dist = 1.0 - qn @ _unit(cond).T          # cached; cond is static
     elif metric == "l2":
         dist = _l2_to_all(q, cond)          # squared; ranking is unchanged
     else:
