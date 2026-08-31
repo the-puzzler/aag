@@ -58,8 +58,11 @@ def main():
                          "already 60%% of the assigned-z error. A marginal of a "
                          "Gaussianised z is still Gaussian, so the assignment "
                          "stays valid on the kept dims.")
-    ap.add_argument("--ctx-frames", type=int, default=24,
-                    help="Keep only the newest N of the 24 context blocks. The "
+    ap.add_argument("--ctx-frames", type=int, default=0,
+                    help="Keep only the newest N context blocks (0 = all of "
+                         "whatever the assignment holds; its own --ctx-frames "
+                         "may already have shortened it, and the saved cond is "
+                         "the sliced one). The "
                          "stored cond is recency-scaled by sqrt(gamma^i) with "
                          "the newest block at weight 1, so a suffix slice is "
                          "exactly what a shorter-context particle build would "
@@ -128,8 +131,11 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     args.out.mkdir(parents=True, exist_ok=True)
 
-    CTX, DIM = 24, 256
+    DIM = 256
     A = torch.load(args.assignment, map_location="cpu", weights_only=False)
+    # The assignment saves the cond it actually transported against, which its
+    # own --ctx-frames may have shortened, so 24 is not safe to assume.
+    CTX = A["cond"].shape[1] // DIM
     for k in ("chunk", "frame"):
         if A.get(k) is None:
             raise SystemExit(
@@ -142,7 +148,7 @@ def main():
         if not 0 < args.z_dims <= z.shape[1]:
             raise SystemExit(f"--z-dims must be in 1..{z.shape[1]}")
         z = z[:, :args.z_dims].contiguous()
-    if args.ctx_frames != CTX:
+    if args.ctx_frames and args.ctx_frames != CTX:
         if not 0 < args.ctx_frames <= CTX:
             raise SystemExit(f"--ctx-frames must be in 1..{CTX}")
         cond = cond[:, (CTX - args.ctx_frames) * DIM:].contiguous()

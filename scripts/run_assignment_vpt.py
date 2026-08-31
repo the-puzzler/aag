@@ -59,6 +59,18 @@ ap.add_argument("--save-every", type=int, default=0,
                      "end. A long run that only saves on completion loses "
                      "everything to a crash, and cannot be stopped early to take "
                      "what it has.")
+ap.add_argument("--grp-uniform", action="store_true",
+                help="Restore the old uniform-over-classes sampling for the "
+                     "exact-class action transport. The default now samples a "
+                     "class with probability proportional to max(1, n/"
+                     "max_group), which equalises transport touches PER "
+                     "PARTICLE rather than per class. Uniform sampling gave "
+                     "VPT's a9 (n=74,291) 0.022 touches per member per step "
+                     "against a46 (n=371) at 0.198 -- a 9x disparity biased "
+                     "against the commonest actions, which are exactly the "
+                     "ones used at inference. It showed up as corr(log n, "
+                     "per-action ratio) = +0.75 with the big classes worst "
+                     "decorrelated. Only for reproducing pre-fix runs.")
 ap.add_argument("--ctx-frames", type=int, default=0,
                 help="Transport against only the newest N of the stored context "
                      "blocks (0 = all of them). Measured on the 24-frame cosine "
@@ -171,7 +183,8 @@ for step in range(1, a.steps + 1):
                                        n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen)
     for _ in range(a.grp_per_step):
         group_rank_transport_step(z, act, n_dirs=a.n_dirs, alpha=a.cond_alpha,
-                                  gen=gen, max_group=a.max_group)
+                                  gen=gen, max_group=a.max_group,
+                                  size_weighted=not a.grp_uniform)
 
     if step % a.eval_every == 0 or step == 1:
         floor = random_subset_w2(z, k=a.eval_k, n_eval=20, gen=gen)
@@ -230,7 +243,7 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "steps": step0 + a.steps, "k": a.k, "k_act": a.k_act,
             "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
             "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step,
-            "ctx_metric": a.ctx_metric,
+            "ctx_metric": a.ctx_metric, "grp_uniform": a.grp_uniform,
             "context": P["context"], "gamma": P["gamma"],
             "ctx_frames": a.ctx_frames,
             "particles": a.particles}, out)

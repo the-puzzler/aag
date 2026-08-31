@@ -396,7 +396,38 @@ def action_dist_knn_transport_step(z, cond, act_vec, *, k, k_act, n_dirs, alpha,
 # --------------------------------------------------------------------------- #
 # 1.2c  discrete-group conditional rank transport
 # --------------------------------------------------------------------------- #
-def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=None):
+_GROUP_CACHE = {}
+
+
+def _group_weights(group_ids, max_group):
+    """Group ids, and sampling weights that equalise touches PER PARTICLE.
+
+    Sampling a group uniformly does not spread transport evenly over particles.
+    One firing touches min(n, max_group) members of a class of size n, so the
+    per-member touch rate is p(n) * min(n, max_group) / n. Holding that constant
+    across classes gives p(n) proportional to n / min(n, max_group), i.e.
+    max(1, n / max_group).
+
+    Measured on VPT's 81 action classes with max_group=8192: uniform sampling
+    gave a9 (n=74,291) 0.022 touches per member per step against a46 (n=371) at
+    0.198, a 9x disparity biased against the commonest actions -- which are the
+    ones used at inference. It showed up as corr(log n, per-action ratio) = +0.75
+    with the big classes worst decorrelated.
+    """
+    key = (group_ids.data_ptr(), tuple(group_ids.shape), max_group)
+    hit = _GROUP_CACHE.get(key)
+    if hit is not None:
+        return hit
+    groups, counts = torch.unique(group_ids, return_counts=True)
+    cap = counts.clamp(max=max_group) if max_group else counts
+    wts = counts.to(torch.float32) / cap.to(torch.float32)
+    _GROUP_CACHE.clear()
+    _GROUP_CACHE[key] = (groups, wts)
+    return groups, wts
+
+
+def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=None,
+                              size_weighted=True):
     """Conditional transport for DISCRETE, disjoint condition groups.
 
     conditional_rank_transport_step approximates "same condition" by a k-NN
@@ -410,8 +441,13 @@ def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=Non
     that group to Gaussian quantiles along it.
     """
     N, d = z.shape
-    groups = torch.unique(group_ids)
-    gi = groups[int(torch.randint(len(groups), (1,), device=z.device, generator=gen))]
+    if size_weighted:
+        groups, wts = _group_weights(group_ids, max_group)
+        gi = groups[int(torch.multinomial(wts, 1, generator=gen))]
+    else:
+        groups = torch.unique(group_ids)
+        gi = groups[int(torch.randint(len(groups), (1,), device=z.device,
+                                      generator=gen))]
     idx = (group_ids == gi).nonzero(as_tuple=True)[0]
     if max_group is not None and idx.numel() > max_group:
         idx = idx[torch.randperm(idx.numel(), device=z.device, generator=gen)[:max_group]]
