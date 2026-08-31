@@ -235,10 +235,12 @@ def main():
             ch=args.ch, image_size=args.image_size).to(dev)
     else:
         model = ConvDecoder(n_in, ch=args.ch, image_size=args.image_size).to(dev)
+    resume_ck = None
     if args.resume is not None:
-        rk = torch.load(args.resume, map_location=dev, weights_only=False)
-        model.load_state_dict(rk["model_state_dict"])
-        print(f"resumed from {args.resume} (epoch {rk.get('epoch')})", flush=True)
+        resume_ck = torch.load(args.resume, map_location=dev, weights_only=False)
+        model.load_state_dict(resume_ck["model_state_dict"])
+        print(f"resumed from {args.resume} (epoch {resume_ck.get('epoch')})",
+              flush=True)
     print(f"generator params: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
     perceptual = lpips.LPIPS(net="vgg").to(dev).eval()
@@ -256,6 +258,24 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=args.epochs * max(1, N // args.batch))
+    if resume_ck is not None:
+        # Model weights alone are not a resume. Without the Adam moments the
+        # first steps after a restart are effectively un-preconditioned, and
+        # without the critic the generator is briefly scored by a random one.
+        if resume_ck.get("opt_state_dict"):
+            opt.load_state_dict(resume_ck["opt_state_dict"])
+        if disc is not None and resume_ck.get("disc_state_dict") is not None:
+            disc.load_state_dict(resume_ck["disc_state_dict"])
+            if opt_d is not None and resume_ck.get("opt_d_state_dict"):
+                opt_d.load_state_dict(resume_ck["opt_d_state_dict"])
+            print("  critic and its optimiser restored", flush=True)
+        # One continuous cosine over the NEW horizon rather than a warm restart
+        # at peak LR: fast-forward the schedule to where this resume begins.
+        for _ in range(args.start_epoch * max(1, N // args.batch)):
+            sched.step()
+        print(f"  resumed at epoch {args.start_epoch}, lr now "
+              f"{opt.param_groups[0]['lr']:.2e} on a {args.epochs}-epoch cosine",
+              flush=True)
     amp = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if args.amp else \
           (lambda: torch.enable_grad())
 
@@ -349,7 +369,10 @@ def main():
             ck = args.out / "checkpoints"; ck.mkdir(exist_ok=True)
             torch.save({"model_state_dict": model.state_dict(), "epoch": ep + 1,
                         "input_dim": n_in, "dim_z": dim_z, "ch": args.ch,
-                    "ctx_frames": CTX, "ctx_dim": DIM,
+                        "ctx_frames": CTX, "ctx_dim": DIM,
+                        "opt_state_dict": opt.state_dict(),
+                        "opt_d_state_dict": (opt_d.state_dict()
+                                             if opt_d is not None else None),
                         "image_size": args.image_size, "n_actions": args.n_actions,
                         "act_vec": args.act_vec, "gan_weight": args.gan_weight,
                         "arch": args.arch, "d_model": args.d_model,
