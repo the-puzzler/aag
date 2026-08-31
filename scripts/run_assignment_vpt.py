@@ -59,6 +59,19 @@ ap.add_argument("--save-every", type=int, default=0,
                      "end. A long run that only saves on completion loses "
                      "everything to a crash, and cannot be stopped early to take "
                      "what it has.")
+ap.add_argument("--act-groups", default="joint",
+                help="Comma list of action groupings for the exact-class "
+                     "transport, INTERLEAVED within every step. The 81-way "
+                     "index is a product, action = move*9 + turn*3 + tilt, so "
+                     "independence from the joint class does not imply "
+                     "independence from move alone or turn alone -- the same "
+                     "aggregate-hides-the-marginal error as the context side. "
+                     "Measured on the 3-frame assignment: joint 81-way mean "
+                     "0.593, but 'turning vs not' 1.272 and 'turn only' 1.043. "
+                     "z still carried whether the player was turning, so a "
+                     "fresh z argues with the turn command, which is what weak "
+                     "action following looks like. Choices: joint, move, turn, "
+                     "tilt, moveturn, turntilt, moving, turning.")
 ap.add_argument("--grp-uniform", action="store_true",
                 help="Restore the old uniform-over-classes sampling for the "
                      "exact-class action transport. The default now samples a "
@@ -138,6 +151,10 @@ if a.ctx_frames:
     cond = cond[:, (_C - a.ctx_frames) * _blk:].contiguous()
     P["context"] = a.ctx_frames
 act = P["action"].to(dev)
+_m, _t, _p = act // 9, (act // 3) % 3, act % 3
+_ACT_GROUPINGS = {"joint": act, "move": _m, "turn": _t, "tilt": _p,
+                  "moveturn": _m * 3 + _t, "turntilt": _t * 3 + _p,
+                  "moving": (_m > 0).long(), "turning": (_t > 0).long()}
 av = P["action_vec"].to(dev).float()
 N, d = h.shape
 # h_context is 40.9 GB at 1.66M particles and is dead once cond is on the GPU.
@@ -165,6 +182,16 @@ if scales:
     print(f"multi-scale context transport: scales {scales}, "
           f"{per} firings each per step "
           f"({[c.shape[1] for c in cond_scales]} dims)", flush=True)
+act_groups = [x.strip() for x in a.act_groups.split(",") if x.strip()]
+for _g in act_groups:
+    if _g not in _ACT_GROUPINGS:
+        raise SystemExit(f"--act-groups: unknown '{_g}', choose from "
+                         f"{sorted(_ACT_GROUPINGS)}")
+grp_ids = [_ACT_GROUPINGS[g] for g in act_groups]
+grp_per = max(1, a.grp_per_step // len(grp_ids))
+if len(grp_ids) > 1:
+    print(f"action groupings interleaved: {act_groups}, {grp_per} firings each "
+          f"per step", flush=True)
 print(f"budget: {a.steps} global x ({a.ctx_per_step} ctx + {a.act_per_step} act "
       f"+ {a.grp_per_step} grp) = "
       f"{a.steps*(a.ctx_per_step+a.act_per_step+a.grp_per_step):,} conditional firings",
@@ -223,10 +250,12 @@ for step in range(1, a.steps + 1):
     for _ in range(a.act_per_step):
         action_dist_knn_transport_step(z, cond, av, k=a.k, k_act=a.k_act,
                                        n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen)
-    for _ in range(a.grp_per_step):
-        group_rank_transport_step(z, act, n_dirs=a.n_dirs, alpha=a.cond_alpha,
-                                  gen=gen, max_group=a.max_group,
-                                  size_weighted=not a.grp_uniform)
+    for _gids in grp_ids:
+        for _ in range(grp_per):
+            group_rank_transport_step(z, _gids, n_dirs=a.n_dirs,
+                                      alpha=a.cond_alpha, gen=gen,
+                                      max_group=a.max_group,
+                                      size_weighted=not a.grp_uniform)
 
     if step % a.eval_every == 0 or step == 1:
         floor = random_subset_w2(z, k=a.eval_k, n_eval=20, gen=gen)
@@ -286,7 +315,7 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
             "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step,
             "ctx_metric": a.ctx_metric, "grp_uniform": a.grp_uniform,
-            "ctx_scales": scales,
+            "ctx_scales": scales, "act_groups": act_groups,
             "context": P["context"], "gamma": P["gamma"],
             "ctx_frames": a.ctx_frames,
             "particles": a.particles}, out)

@@ -430,7 +430,11 @@ def _group_weights(group_ids, max_group):
     groups, counts = torch.unique(group_ids, return_counts=True)
     cap = counts.clamp(max=max_group) if max_group else counts
     wts = counts.to(torch.float32) / cap.to(torch.float32)
-    _GROUP_CACHE.clear()
+    # keep several: an interleaved run cycles between groupings inside one step,
+    # and a single-entry cache would re-run torch.unique over 512k ids every
+    # firing. These are tiny (one entry per distinct group id).
+    while len(_GROUP_CACHE) >= 16:
+        _GROUP_CACHE.pop(next(iter(_GROUP_CACHE)))
     _GROUP_CACHE[key] = (groups, wts)
     return groups, wts
 
