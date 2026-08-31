@@ -223,6 +223,7 @@ def _sq_norms(x, chunk=65536):
 
 
 _UNIT_CACHE = {}
+_UNIT_CACHE_MAX = 8
 
 
 def _unit(x, chunk=65536):
@@ -231,8 +232,15 @@ def _unit(x, chunk=65536):
     cosine needs x / ||x|| for every row. Recomputing it per firing allocates a
     full-size copy each time -- 12.6 GB at 512k particles, 40.9 GB at 1.66M.
     cond never changes during an assignment, so build it once.
+
+    Holds several entries rather than one. A multi-scale run cycles between
+    context lengths within a single step, and a single-entry cache would
+    renormalise every tensor on every step -- billions of elements per step,
+    which dwarfs the transport itself. Eviction is oldest-first; at 512k
+    particles the five scales 1/3/5/12/24 cost 23.6 GB together, against 83 GB
+    free on this card.
     """
-    key = (x.data_ptr(), x.shape, x.dtype)
+    key = (x.data_ptr(), tuple(x.shape), x.dtype)
     hit = _UNIT_CACHE.get(key)
     if hit is not None:
         return hit
@@ -240,7 +248,8 @@ def _unit(x, chunk=65536):
     for i in range(0, x.shape[0], chunk):
         blk = x[i:i + chunk]
         out[i:i + chunk] = blk / blk.norm(dim=1, keepdim=True).clamp_min(1e-12)
-    _UNIT_CACHE.clear()
+    while len(_UNIT_CACHE) >= _UNIT_CACHE_MAX:
+        _UNIT_CACHE.pop(next(iter(_UNIT_CACHE)))
     _UNIT_CACHE[key] = out
     return out
 

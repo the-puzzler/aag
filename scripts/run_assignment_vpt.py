@@ -71,6 +71,24 @@ ap.add_argument("--grp-uniform", action="store_true",
                      "ones used at inference. It showed up as corr(log n, "
                      "per-action ratio) = +0.75 with the big classes worst "
                      "decorrelated. Only for reproducing pre-fix runs.")
+ap.add_argument("--ctx-scales", default="",
+                help="Comma list of context lengths to transport against, "
+                     "INTERLEAVED within every global step (e.g. '1,3,5,12'). "
+                     "Overrides --ctx-frames for the context transport. "
+                     "Motivation: decorrelating z against one context length "
+                     "leaves it correlated with shorter ones. Measured at "
+                     "n_eval=200, the 24-frame assignment reads 0.897 against "
+                     "its own unweighted context but 1.162 / 3.030 / 4.779 / "
+                     "8.253 against the newest 12 / 5 / 3 / 1 -- a monotone "
+                     "escalation as the probe shortens. Shortening the "
+                     "transport to 3 frames moved newest-1 from 8.253 to "
+                     "2.139, but the same gap reappeared one scale down (its "
+                     "own metric read 1.246). Interleaving all scales in one "
+                     "run addresses every scale at once, and unlike a staged "
+                     "coarse-to-fine schedule no later stage can undo an "
+                     "earlier one. The ctx budget is split evenly across "
+                     "scales. The FULL context is saved, so the generator "
+                     "still sees all 24 frames.")
 ap.add_argument("--ctx-frames", type=int, default=0,
                 help="Transport against only the newest N of the stored context "
                      "blocks (0 = all of them). Measured on the 24-frame cosine "
@@ -107,6 +125,9 @@ import gc
 P = torch.load(a.particles, map_location="cpu", weights_only=False)
 h = P["h_target"].to(dev).float()
 cond = P["h_context"].to(dev).float()
+scales = [int(x) for x in a.ctx_scales.split(",") if x.strip()]
+if scales and a.ctx_frames:
+    raise SystemExit("--ctx-scales and --ctx-frames are alternatives")
 if a.ctx_frames:
     _C = int(P["context"])
     if not 0 < a.ctx_frames <= _C:
@@ -129,6 +150,21 @@ gc.collect()
 print(f"{N:,} particles  dim={d}  cond_dim={cond.shape[1]}  "
       f"context={P['context']} gamma={P['gamma']} ctx_metric={a.ctx_metric}",
       flush=True)
+cond_scales = []
+if scales:
+    _C = int(P["context"])
+    _blk = cond.shape[1] // _C
+    for n in scales:
+        if not 0 < n <= _C:
+            raise SystemExit(f"--ctx-scales entries must be in 1..{_C}")
+        # contiguous copies, not views: the transport does a matmul against the
+        # whole tensor every firing, and the cosine path caches a normalised
+        # copy per scale. 1/3/5/12/24 at 512k particles is 23.6 GB together.
+        cond_scales.append(cond[:, (_C - n) * _blk:].contiguous())
+    per = max(1, a.ctx_per_step // len(scales))
+    print(f"multi-scale context transport: scales {scales}, "
+          f"{per} firings each per step "
+          f"({[c.shape[1] for c in cond_scales]} dims)", flush=True)
 print(f"budget: {a.steps} global x ({a.ctx_per_step} ctx + {a.act_per_step} act "
       f"+ {a.grp_per_step} grp) = "
       f"{a.steps*(a.ctx_per_step+a.act_per_step+a.grp_per_step):,} conditional firings",
@@ -175,9 +211,15 @@ for step in range(1, a.steps + 1):
                                alpha=a.alpha, gen=gen)
     # one pass over cond for all ctx firings instead of one per firing --
     # bit-identical, and cond is 12.6 GB at 512k particles
-    continuous_knn_transport_batch(z, cond, k=a.k, n_dirs=a.n_dirs,
-                                   alpha=a.cond_alpha, gen=gen,
-                                   n_fire=a.ctx_per_step, metric=a.ctx_metric)
+    if cond_scales:
+        for _cs in cond_scales:
+            continuous_knn_transport_batch(z, _cs, k=a.k, n_dirs=a.n_dirs,
+                                           alpha=a.cond_alpha, gen=gen,
+                                           n_fire=per, metric=a.ctx_metric)
+    else:
+        continuous_knn_transport_batch(z, cond, k=a.k, n_dirs=a.n_dirs,
+                                       alpha=a.cond_alpha, gen=gen,
+                                       n_fire=a.ctx_per_step, metric=a.ctx_metric)
     for _ in range(a.act_per_step):
         action_dist_knn_transport_step(z, cond, av, k=a.k, k_act=a.k_act,
                                        n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen)
@@ -244,6 +286,7 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
             "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step,
             "ctx_metric": a.ctx_metric, "grp_uniform": a.grp_uniform,
+            "ctx_scales": scales,
             "context": P["context"], "gamma": P["gamma"],
             "ctx_frames": a.ctx_frames,
             "particles": a.particles}, out)
