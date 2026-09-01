@@ -59,6 +59,16 @@ ap.add_argument("--save-every", type=int, default=0,
                      "end. A long run that only saves on completion loses "
                      "everything to a crash, and cannot be stopped early to take "
                      "what it has.")
+ap.add_argument("--keep-checkpoints", action="store_true",
+                help="Write step-stamped checkpoints instead of overwriting one "
+                     "file, so the step count can be chosen after the fact by "
+                     "the fresh-z MSE of a generator trained on each. The "
+                     "optimum is non-monotonic and the transport objective "
+                     "cannot see it: CelebA's 4k assignment fit 1.6-2.2x BETTER "
+                     "than its 60k one, because mean displacement keeps growing "
+                     "(15% of ||z|| at 4k, 43% at 60k) and particles moved that "
+                     "far no longer have neighbouring z mapping to similar "
+                     "images. Costs ~2.6 GB per checkpoint at 512k/dim256.")
 ap.add_argument("--act-groups", default="joint",
                 help="Comma list of action groupings for the exact-class "
                      "transport, INTERLEAVED within every step. The 81-way "
@@ -253,6 +263,22 @@ curve = ({k: list(v) for k, v in R["curve"].items()} if a.resume_z
          else {"step": [], "ctx_ratio": [], "act_ratio": [], "floor": [], "G": []})
 
 
+# Mean transport displacement ||z - z_whitened||, the quantity that PREDICTED
+# generator fit degradation when the per-step objective could not see it. On
+# CelebA the 4k assignment moved particles 15% of their own radius and the 60k
+# one 43%, and the 60k z fit 1.6-2.2x WORSE at matched epochs: particles moved so
+# far that neighbouring z no longer map to similar images, so the z->image map
+# loses locality. The greedy objective is inside its own noise band long before
+# this stops growing, so it cannot be used as the stopping signal. Logging this
+# is what makes "it has moved too much" a measurement rather than an intuition.
+z_ref = z.clone()
+_zrad = float(z.shape[1]) ** 0.5          # typical ||z|| for N(0,I_d)
+
+
+def displacement():
+    return float((z - z_ref).norm(dim=1).mean())
+
+
 def gdefect(t):
     dirs = torch.randn(64, t.shape[1], device=t.device, generator=gen)
     dirs = dirs / dirs.norm(dim=1, keepdim=True)
@@ -293,16 +319,30 @@ for step in range(1, a.steps + 1):
         actw = action_dist_knn_w2(z, cond, av, k=a.eval_k, k_act=a.k_act,
                                   n_eval=20, gen=gen)
         G = gdefect(z)
+        disp = displacement()
         curve["step"].append(step0 + step)
         curve["floor"].append(floor); curve["G"].append(G)
         curve["ctx_ratio"].append(ctx / max(floor, 1e-12))
         curve["act_ratio"].append(actw / max(floor, 1e-12))
+        curve.setdefault("disp", []).append(disp)
         print(f"step {step0 + step:5d}  G={G:.5f}  floor={floor:.5f}  "
-              f"I_ctx={ctx/max(floor,1e-12):.3f}  I_act={actw/max(floor,1e-12):.3f}",
+              f"I_ctx={ctx/max(floor,1e-12):.3f}  I_act={actw/max(floor,1e-12):.3f}"
+              f"  disp={disp:.3f} ({100*disp/_zrad:.0f}% of ||z||)",
               flush=True)
 
     if a.save_every and step % a.save_every == 0 and step < a.steps:
-        _p = Path(a.out); _p.parent.mkdir(parents=True, exist_ok=True)
+        # --keep-checkpoints writes step-stamped files instead of overwriting one.
+        # The number of transport steps is a real hyperparameter with a KNOWN
+        # non-monotonic optimum -- CelebA's 4k assignment beat its 60k one by
+        # 1.6-2.2x on generator fit because displacement costs z->image locality
+        # -- and the transport objective saturates long before it can be read off.
+        # Keeping the intermediates makes the step count selectable afterwards by
+        # fresh-z MSE, which is the only thing that has ever selected here.
+        # Overwriting one file forces the choice before the evidence exists.
+        _p = Path(a.out)
+        if a.keep_checkpoints:
+            _p = _p.with_name(f"{_p.stem}_step{step0 + step}{_p.suffix}")
+        _p.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
                     "chunk": P.get("chunk"), "frame": P.get("frame"),
                     "episode": P.get("episode"), "cache": P.get("cache"),
