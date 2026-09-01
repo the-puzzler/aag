@@ -139,8 +139,10 @@ P = torch.load(a.particles, map_location="cpu", weights_only=False)
 h = P["h_target"].to(dev).float()
 cond = P["h_context"].to(dev).float()
 scales = [int(x) for x in a.ctx_scales.split(",") if x.strip()]
-if scales and a.ctx_frames:
-    raise SystemExit("--ctx-scales and --ctx-frames are alternatives")
+# The two compose: --ctx-frames sets what the generator will SEE (cond is sliced
+# before saving), --ctx-scales sets what the transport decorrelates AGAINST
+# within that. "--ctx-frames 3 --ctx-scales 1,3" keeps a 3-frame model while
+# closing the newest-1 gap, which a plain 3-frame transport leaves at 2.139.
 if a.ctx_frames:
     _C = int(P["context"])
     if not 0 < a.ctx_frames <= _C:
@@ -169,7 +171,7 @@ print(f"{N:,} particles  dim={d}  cond_dim={cond.shape[1]}  "
       flush=True)
 cond_scales = []
 if scales:
-    _C = int(P["context"])
+    _C = int(P["context"])          # already reduced if --ctx-frames sliced
     _blk = cond.shape[1] // _C
     for n in scales:
         if not 0 < n <= _C:
