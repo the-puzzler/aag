@@ -46,7 +46,9 @@ def main():
                          "conditioning and is always used.")
     ap.add_argument("--action-onehot", action="store_true",
                     help="Legacy: also feed the 81-way one-hot alongside the "
-                         "12-d vector, reproducing the pre-12d condition. Off "
+                         "action vector. Note this is not bit-identical to a "
+                         "pre-12d run, whose vector was 9-d (no E, no clicks). "
+                         "Off "
                          "by default. The index is a deterministic function of "
                          "a subset of the vector, so it adds no information; it "
                          "cannot express attack/use/E; and it quantises every "

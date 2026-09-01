@@ -39,7 +39,15 @@ def main():
     ap.add_argument("--cache", type=Path, default=Path("/data/vpt/cache_train"))
     ap.add_argument("--out", type=Path, default=None,
                     help="default: overwrite --particles in place (atomic via .tmp)")
-    ap.add_argument("--require-clicks", action="store_true", default=True)
+    ap.add_argument("--allow-partial-clicks", action="store_true",
+                    help="Proceed even if some particles sit on clips whose "
+                         "clicks were never recovered. Off by default and it "
+                         "should stay off: an unpatched row is the zero-fill "
+                         "from array creation, which is indistinguishable from "
+                         "'the player never clicked'. Fitting act_norm over "
+                         "those rows biases every press rate downward and "
+                         "teaches the generator that a third of frames have no "
+                         "button down when they do.")
     args = ap.parse_args()
 
     C = args.cache
@@ -76,9 +84,13 @@ def main():
     print(f"clicks coverage: {N - n_bad:,}/{N:,} particles "
           f"({100.0*(N-n_bad)/max(N,1):.2f}%) from {len(ok_rel):,}/{len(done):,} clips",
           flush=True)
-    if n_bad and args.require_clicks:
-        print(f"WARNING {n_bad:,} particles sit on unpatched clips -- their "
-              f"attack/use are zero-filled, not observed.", flush=True)
+    if n_bad and not args.allow_partial_clicks:
+        raise SystemExit(
+            f"{n_bad:,}/{N:,} particles sit on clips whose clicks were never "
+            f"recovered; their attack/use are the zero-fill, not observations. "
+            f"Re-run scripts/patch_vpt_clicks.py (it resumes, so it only retries "
+            f"failures), or pass --allow-partial-clicks if you have decided the "
+            f"bias is acceptable.")
 
     kv = np.stack([np.asarray(keys[c, t]) for c, t in zip(ch, fr)])
     mv = np.stack([np.asarray(mouse[c, t]) for c, t in zip(ch, fr)])

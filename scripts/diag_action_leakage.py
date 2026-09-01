@@ -65,6 +65,26 @@ def probe(xtr, xte, ytr, yte, k, dev, epochs, seed=0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--assignment", type=Path, required=True)
+    ap.add_argument("--particles", type=Path, default=None,
+                    help="Take action_raw from this particle file instead of "
+                         "from the assignment. Lets a PRE-12d assignment be "
+                         "probed against the new marginals, which is the only "
+                         "way to get a before/after rather than a lone number. "
+                         "Particle order is identity, so this is only valid for "
+                         "the particle file the assignment was actually built "
+                         "from -- the N check below is the guard.")
+    ap.add_argument("--control", action="store_true",
+                    help="Replace z with fresh N(0,I) noise of the same shape "
+                         "and report the same table. This is the NULL, and it is "
+                         "not optional when reading small numbers: appending 256 "
+                         "uninformative dims to a 768-dim probe input costs the "
+                         "probe some accuracy, so 'z adds' has a negative bias "
+                         "whose size is unknown until measured. A true "
+                         "assignment's z is marginally N(0,I), so noise of the "
+                         "same shape is exactly the right null -- any row where "
+                         "z scores no higher than the control carries no "
+                         "detectable action information, and the control's own "
+                         "spread IS the detection threshold.")
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--subset", type=int, default=0,
                     help="probe on N particles instead of all (0 = all)")
@@ -77,12 +97,32 @@ def main():
     print(f"{N:,} particles from {args.assignment.parent.name}  "
           f"z {z.shape[1]}  cond {cond.shape[1]}", flush=True)
 
-    targets = []
+    raw = None
     if A.get("action_raw") is not None:
         raw = A["action_raw"].numpy()
+        cov = A.get("clicks_coverage")
+    elif args.particles is not None:
+        # a pre-12d assignment: take the marginals from the particle file it was
+        # built from. Particle order IS identity, so this is only valid for that
+        # file -- N is the guard.
+        Pp = torch.load(args.particles, map_location="cpu", weights_only=False)
+        if Pp.get("action_raw") is None:
+            raise SystemExit(f"{args.particles} has no action_raw -- patch it "
+                             f"with scripts/patch_vpt_particle_actions.py first")
+        if Pp["action_raw"].shape[0] != N:
+            raise SystemExit(
+                f"{args.particles} has {Pp['action_raw'].shape[0]:,} particles "
+                f"but the assignment has {N:,} -- different particle set, so the "
+                f"row-for-row join would be meaningless")
+        raw = Pp["action_raw"].numpy()
+        cov = Pp.get("clicks_coverage")
+        print(f"action_raw taken from {args.particles.name}", flush=True)
+        del Pp
+
+    targets = []
+    if raw is not None:
         for nm, g in action_marginals(raw).items():
             targets.append((nm, torch.from_numpy(g).long(), int(g.max()) + 1))
-        cov = A.get("clicks_coverage")
         if cov is not None:
             print(f"clicks coverage {100*cov:.2f}% of particles", flush=True)
     else:
@@ -107,22 +147,42 @@ def main():
     ctr, cte = cond[tr].to(dev), cond[te].to(dev)
     ztr, zte = z[tr].to(dev), z[te].to(dev)
     czt, czv = torch.cat([ctr, ztr], 1), torch.cat([cte, zte], 1)
+    if args.control:
+        g2 = torch.Generator(device=dev).manual_seed(1234)
+        ntr_ = torch.randn(ztr.shape, device=dev, generator=g2)
+        nte_ = torch.randn(zte.shape, device=dev, generator=g2)
+        cnt, cnv = torch.cat([ctr, ntr_], 1), torch.cat([cte, nte_], 1)
 
-    print(f"\n{'marginal':14s} {'groups':>6s} {'chance':>8s} {'cond':>8s} "
-          f"{'cond+z':>8s} {'z adds':>8s}", flush=True)
+    hdr = (f"\n{'marginal':14s} {'groups':>6s} {'chance':>8s} {'cond':>8s} "
+           f"{'cond+z':>8s} {'z adds':>8s}")
+    if args.control:
+        hdr += f" {'noise':>8s} {'z-noise':>8s}"
+    print(hdr, flush=True)
     rows = []
     for name, y, k in targets:
         ytr, yte = y[tr].to(dev), y[te].to(dev)
         base = torch.bincount(yte, minlength=k).max().item() / len(yte)
         a = probe(ctr, cte, ytr, yte, k, dev, args.epochs)
         b = probe(czt, czv, ytr, yte, k, dev, args.epochs)
-        rows.append((name, b - a))
-        print(f"{name:14s} {k:6d} {100*base:7.2f}% {100*a:7.2f}% {100*b:7.2f}% "
-              f"{100*(b-a):+7.2f}", flush=True)
+        line = (f"{name:14s} {k:6d} {100*base:7.2f}% {100*a:7.2f}% "
+                f"{100*b:7.2f}% {100*(b-a):+7.2f}")
+        excess = b - a
+        if args.control:
+            c = probe(cnt, cnv, ytr, yte, k, dev, args.epochs)
+            excess = b - c          # against the null, not against cond alone
+            line += f" {100*(c-a):+7.2f} {100*(b-c):+7.2f}"
+        rows.append((name, excess))
+        print(line, flush=True)
 
     rows.sort(key=lambda r: -r[1])
-    print(f"\nworst leaks: " + ", ".join(f"{n} {100*v:+.2f}" for n, v in rows[:5]),
-          flush=True)
+    key = "z above the N(0,I) null" if args.control else "z above cond"
+    print(f"\nworst leaks ({key}): "
+          + ", ".join(f"{n} {100*v:+.2f}" for n, v in rows[:5]), flush=True)
+    if args.control:
+        vals = np.array([v for _, v in rows])
+        print(f"null-referenced excess: mean {100*vals.mean():+.2f} "
+              f"sd {100*vals.std():.2f} -> anything under ~{100*2*vals.std():.2f} "
+              f"points is inside this instrument's band", flush=True)
     print("\n'z adds' is action information present in z that the context did not\n"
           "already carry. Near zero is what conditional independence should give;\n"
           "positive is what lets a fresh z override the action it was handed.",
