@@ -70,8 +70,16 @@ ap.add_argument("--act-groups", default="joint",
                      "0.593, but 'turning vs not' 1.272 and 'turn only' 1.043. "
                      "z still carried whether the player was turning, so a "
                      "fresh z argues with the turn command, which is what weak "
-                     "action following looks like. Choices: joint, move, turn, "
-                     "tilt, moveturn, turntilt, moving, turning.")
+                     "action following looks like. Legacy 81-way choices: "
+                     "joint, move, turn, tilt, moveturn, turntilt, moving, "
+                     "turning. With the 12-d representation (action_raw "
+                     "present) each control is also a grouping in its own "
+                     "right: w, a, s, d, space, shift, ctrl, e, attack, use, "
+                     "anyclick, plus dxsign/dysign (3 each, cache deadzones) "
+                     "and dxmag/dymag (deadzone + terciles). Prefer these -- "
+                     "they are exactly the marginals of what the generator now "
+                     "sees, whereas the 81-way ones are marginals of an index "
+                     "it no longer receives.")
 ap.add_argument("--grp-uniform", action="store_true",
                 help="Restore the old uniform-over-classes sampling for the "
                      "exact-class action transport. The default now samples a "
@@ -154,16 +162,35 @@ if a.ctx_frames:
     P["context"] = a.ctx_frames
 act = P["action"].to(dev)
 _m, _t, _p = act // 9, (act // 3) % 3, act % 3
+# Legacy groupings, derived from the 81-way index. Retained so pre-12d
+# assignments reproduce; the index itself is no longer generator input.
 _ACT_GROUPINGS = {"joint": act, "move": _m, "turn": _t, "tilt": _p,
                   "moveturn": _m * 3 + _t, "turntilt": _t * 3 + _p,
                   "moving": (_m > 0).long(), "turning": (_t > 0).long()}
+# The 12-d representation's marginals: one per binary control, mouse direction
+# and mouse magnitude per axis. These are the low-dimensional functions of the
+# condition the generator can actually key on now that it sees the 12-d vector
+# and nothing else, and the project's standing lesson is that independence from
+# the vector AS A WHOLE does not imply independence from any of them.
+if "action_raw" in P:
+    from aag.vpt_actions import action_marginals
+    _raw = P["action_raw"].numpy()
+    for _nm, _g in action_marginals(_raw).items():
+        _ACT_GROUPINGS[_nm] = torch.from_numpy(_g).to(dev)
+    del _raw
 av = P["action_vec"].to(dev).float()
 N, d = h.shape
 # h_context is 40.9 GB at 1.66M particles and is dead once cond is on the GPU.
 # Holding it alongside the GPU copy AND the save-time cond.cpu() copy is what
 # OOM-killed the first 32k attempt -- earlyoom fired at VmRSS 117 GB.
 _keep = {k: P[k] for k in ("chunk", "frame", "episode", "cache", "checkpoint",
-                           "context", "gamma") if k in P}
+                           "context", "gamma",
+                           # the 12-d action side: act_norm is the inference
+                           # contract (live input must be encoded with the same
+                           # constants), action_raw is what the diagnostics
+                           # rebuild the marginals from. 24 MB at 512k.
+                           "action_raw", "act_norm", "act_names", "act_dim",
+                           "clicks_coverage") if k in P}
 P.clear(); P.update(_keep)
 gc.collect()
 print(f"{N:,} particles  dim={d}  cond_dim={cond.shape[1]}  "
@@ -281,6 +308,9 @@ for step in range(1, a.steps + 1):
                     "episode": P.get("episode"), "cache": P.get("cache"),
                     "ae_checkpoint": P.get("checkpoint"),
                     "action_vec": av.cpu(), "mean": mean.cpu(), "W": W.cpu(),
+                    "action_raw": P.get("action_raw"), "act_norm": P.get("act_norm"),
+                    "act_names": P.get("act_names"), "act_dim": P.get("act_dim"),
+                    "clicks_coverage": P.get("clicks_coverage"),
                     "W_inv": W_inv.cpu(), "curve": curve, "per_action": None,
                     "steps": step0 + step, "k": a.k, "k_act": a.k_act,
                     "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,
@@ -312,6 +342,9 @@ torch.save({"z": z.cpu(), "h": h.cpu(), "cond": cond.cpu(), "action": act.cpu(),
             "episode": P.get("episode"), "cache": P.get("cache"),
             "ae_checkpoint": P.get("checkpoint"),
             "action_vec": av.cpu(), "mean": mean.cpu(), "W": W.cpu(), "W_inv": W_inv.cpu(),
+            "action_raw": P.get("action_raw"), "act_norm": P.get("act_norm"),
+            "act_names": P.get("act_names"), "act_dim": P.get("act_dim"),
+            "clicks_coverage": P.get("clicks_coverage"),
             "curve": curve, "per_action": pa,
             "steps": step0 + a.steps, "k": a.k, "k_act": a.k_act,
             "ctx_per_step": a.ctx_per_step, "act_per_step": a.act_per_step,

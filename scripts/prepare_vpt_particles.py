@@ -5,9 +5,13 @@ A particle is one target frame plus the conditioning needed to generate it:
 
     h_target   (dim,)            what the generator must produce
     h_context  (ctx*dim,)        the ctx preceding frame latents, recency-weighted
-    action     (int)             the 81-way categorical, kept for exact grouping
-    action_vec (A,)              continuous action features, for a DISTANCE on
-                                 the action side instead of an exact match
+    action     (int)             the 81-way categorical, kept only so the legacy
+                                 exact-class groupings still work; NOT generator
+                                 input any more
+    action_raw (12,)             the physical action: W A S D space shift ctrl E
+                                 attack use in {0,1}, then dx, dy in pixels
+    action_vec (12,)             the same, mapped for use as a DISTANCE on the
+                                 action side instead of an exact match
 
 Design decisions and why:
 
@@ -25,12 +29,17 @@ Design decisions and why:
     sqrt(gamma**i), so a plain L2 on the result IS the recency-weighted L2. That
     means no change to cond_distance and no new metric code.
 
-  * action_vec is signed-log1p then standardised. Raw, dx alone is 81% of the L2
-    variance and the key bits are ~0% -- a nearest-k on raw actions would be a
-    nearest-k on dx. Mouse is then upweighted by sqrt(MOUSE_W) because mouse
-    magnitude explains 16.4% of frame-to-frame pixel variance against 2.1% for
-    all keys combined. The E column is dropped: it only fired on inventory-open
-    frames, so it is near-constant and standardising it manufactures noise.
+  * The action representation is the 12-d vector in aag/vpt_actions.py -- the
+    eleven controls a player actually has, and nothing derived. Mouse is
+    signed-log1p then standardised and scaled so the two mouse columns hold
+    MOUSE_W times the binaries' total variance: raw and unweighted, dx alone is
+    81% of the L2 variance so a nearest-k on actions is really a nearest-k on
+    dx, and MOUSE_W=8 is the measured ratio (mouse magnitude explains 16.4% of
+    frame-to-frame pixel variance against 2.1% for all keys combined). The
+    binaries stay at a bounded 0/1 rather than being standardised, which is what
+    lets E back in: at a 0.41% press rate, standardising it produces a +/-15.6
+    swing that decides every neighbourhood it appears in, and the earlier build
+    dropped the column instead of fixing the scaling.
 """
 from __future__ import annotations
 
@@ -42,21 +51,10 @@ import torch
 
 from aag.ae import AutoEncoder
 from aag.datasets import open_segments
+from aag.vpt_actions import (A_DIM, ACTION_NAMES, apply_action_norm,
+                             build_action_raw, fit_action_norm)
 
-KEY_COLS = list(range(7))          # W A S D space shift ctrl -- drop E (col 7)
 MOUSE_W = 8.0                      # mouse:key variance ratio from the pixel-change fit
-
-
-def build_action_vec(keys, mouse):
-    """(N,7) keys + (N,2) mouse -> standardised, mouse-upweighted features."""
-    k = keys[:, KEY_COLS].astype(np.float32)
-    m = np.sign(mouse).astype(np.float32) * np.log1p(np.abs(mouse.astype(np.float32)))
-    v = np.concatenate([k, m], 1)
-    sd = v.std(0)
-    sd[sd < 1e-6] = 1.0
-    v = (v - v.mean(0)) / sd
-    v[:, -2:] *= np.sqrt(MOUSE_W)
-    return v
 
 
 def main():
@@ -97,6 +95,13 @@ def main():
     acts = np.load(f"{R}/action_seqs.npy", mmap_mode="r")
     keys = np.load(f"{R}/keys.npy", mmap_mode="r")
     mouse = np.load(f"{R}/mouse.npy", mmap_mode="r")
+    # attack/use, recovered by scripts/patch_vpt_clicks.py -- the original cache
+    # builder's KEYS list was keyboard-only, so the two mouse buttons the player
+    # actually uses most were absent from the condition entirely.
+    if not Path(f"{R}/clicks.npy").exists():
+        raise SystemExit(f"{R}/clicks.npy missing -- run "
+                         f"scripts/patch_vpt_clicks.py --cache {R} first")
+    clicks = np.load(f"{R}/clicks.npy", mmap_mode="r")
     clip = np.load(f"{R}/clip_ids.npy")
 
     n_chunks = n_valid if args.limit_chunks is None else min(n_valid, args.limit_chunks)
@@ -167,7 +172,10 @@ def main():
 
     kv = np.stack([np.asarray(keys[c, t]) for c, t in A_v])
     mv = np.stack([np.asarray(mouse[c, t]) for c, t in A_v])
-    act_vec = build_action_vec(kv, mv)
+    cv = np.stack([np.asarray(clicks[c, t]) for c, t in A_v])
+    act_raw = build_action_raw(kv, mv, cv)
+    act_norm = fit_action_norm(act_raw, MOUSE_W)
+    act_vec = apply_action_norm(act_raw, act_norm)
 
     out = {
         # zero-copy views of the preallocated blocks, trimmed to what was filled
@@ -175,6 +183,8 @@ def main():
         "h_context": torch.from_numpy(H_c[:n_written]),
         "action": torch.tensor(A_i, dtype=torch.long),
         "action_vec": torch.from_numpy(act_vec.astype(np.float32)),
+        "action_raw": torch.from_numpy(act_raw),
+        "act_norm": act_norm, "act_names": list(ACTION_NAMES), "act_dim": A_DIM,
         "episode": torch.tensor(EP, dtype=torch.long),
         # (chunk, frame) for every particle, in particle order. The generator
         # needs these to fetch its pixel targets out of the cache -- without
@@ -185,7 +195,7 @@ def main():
         "cache": str(R), "checkpoint": str(args.checkpoint),
         "n_segments_snapshot": int(n_valid),      # freeze: order IS identity
         "chunk_ids": torch.from_numpy(chunk_ids),  # which chunks were sampled
-        "mouse_weight": MOUSE_W, "key_cols": KEY_COLS,
+        "mouse_weight": MOUSE_W,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, args.out)

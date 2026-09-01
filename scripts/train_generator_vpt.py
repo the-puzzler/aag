@@ -41,14 +41,18 @@ def main():
     ap.add_argument("--cache", default="/opt/dlami/nvme/vpt_full")
     ap.add_argument("--n-actions", type=int, default=81)
     ap.add_argument("--act-vec", action="store_true",
-                    help="Append the 9-d continuous action vector to the one-hot. "
-                         "The assignment decorrelates z from act_vec, but a "
-                         "one-hot is a different partition -- measured, z sits "
-                         "2.49x further off-centre within an action CLASS than "
-                         "chance while context is at 1.03x. Conditioning on both "
-                         "lines the generator up with what was actually "
-                         "decorrelated, and keeps the mouse magnitude the one-hot "
-                         "discards.")
+                    help="No-op, kept so old command lines still run. The "
+                         "continuous action vector is now the ONLY action "
+                         "conditioning and is always used.")
+    ap.add_argument("--action-onehot", action="store_true",
+                    help="Legacy: also feed the 81-way one-hot alongside the "
+                         "12-d vector, reproducing the pre-12d condition. Off "
+                         "by default. The index is a deterministic function of "
+                         "a subset of the vector, so it adds no information; it "
+                         "cannot express attack/use/E; and it quantises every "
+                         "mouse magnitude past a 5 px deadzone into 3 classes, "
+                         "which is what made a turn command read as a tilt. "
+                         "Only for reproducing pre-12d runs.")
     ap.add_argument("--z-dims", type=int, default=0,
                     help="Use only the first N dims of the assigned z (0 = all). "
                          "Tests 'z explains too much, so context becomes "
@@ -154,16 +158,39 @@ def main():
         cond = cond[:, (CTX - args.ctx_frames) * DIM:].contiguous()
         CTX = args.ctx_frames
     N, dim_z = z.shape
-    onehot = torch.zeros(N, args.n_actions)
-    onehot[torch.arange(N), act] = 1.0
-    parts = [z, cond, onehot]
-    a_desc = f"action={args.n_actions}"
-    if args.act_vec:
-        av = A.get("action_vec")
-        if av is None:
-            raise SystemExit("--act-vec needs action_vec in the assignment")
-        parts.append(av.float())
-        a_desc += f" + act_vec={av.shape[1]}"
+    # Action conditioning is the 12-d vector -- 10 binary controls + dx/dy --
+    # and by default NOTHING else. The 81-way one-hot it replaces was a
+    # deterministic function of a SUBSET of this vector, so it added no
+    # information, while being unable to express attack/use/E at all and
+    # collapsing every mouse magnitude past a 5 px deadzone into one class.
+    # Feeding both also invites the network to key on the coarse discrete signal
+    # and underuse magnitude, which is the authority split we already paid for.
+    # 90 dims (81 + 9) -> 12.
+    parts = [z, cond]
+    a_desc = ""
+    if args.action_onehot:
+        onehot = torch.zeros(N, args.n_actions)
+        onehot[torch.arange(N), act] = 1.0
+        parts.append(onehot)
+        a_desc = f"onehot={args.n_actions}"
+    av = A.get("action_vec")
+    if av is None:
+        raise SystemExit("assignment has no 'action_vec' -- patch the particles "
+                         "with scripts/patch_vpt_particle_actions.py, then re-run "
+                         "the assignment")
+    if not args.action_onehot and av.shape[1] < 12:
+        raise SystemExit(
+            f"action_vec is {av.shape[1]}-d, expected 12 (W A S D space shift "
+            f"ctrl E attack use dx dy). This is a pre-clicks particle set: run "
+            f"scripts/patch_vpt_clicks.py then "
+            f"scripts/patch_vpt_particle_actions.py, or pass --action-onehot to "
+            f"reproduce the old condition.")
+    parts.append(av.float())
+    a_desc += (" + " if a_desc else "") + f"act_vec={av.shape[1]}"
+    act_norm = A.get("act_norm")
+    if act_norm is None and not args.action_onehot:
+        print("WARNING assignment carries no act_norm -- live inference cannot "
+              "encode controller input with the same constants", flush=True)
     inp = torch.cat(parts, 1).to(dev)
     n_in = inp.shape[1]
     # Free every CPU copy now the input lives on the GPU. At 1.66M particles
@@ -380,6 +407,13 @@ def main():
                         "opt_d_state_dict": (opt_d.state_dict()
                                              if opt_d is not None else None),
                         "image_size": args.image_size, "n_actions": args.n_actions,
+                        # act_norm and act_names are the inference contract: a
+                        # live controller must be encoded with the SAME
+                        # constants the generator trained on, so they ship
+                        # inside the checkpoint rather than beside it.
+                        "act_norm": act_norm, "act_names": A.get("act_names"),
+                        "act_dim": int(av.shape[1]),
+                        "action_onehot": args.action_onehot,
                         "act_vec": args.act_vec, "gan_weight": args.gan_weight,
                         "arch": args.arch, "d_model": args.d_model,
                         "depth": args.depth, "heads": args.heads,
