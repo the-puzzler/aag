@@ -304,13 +304,29 @@ def main():
             if opt_d is not None and resume_ck.get("opt_d_state_dict"):
                 opt_d.load_state_dict(resume_ck["opt_d_state_dict"])
             print("  critic and its optimiser restored", flush=True)
+        # load_state_dict overwrites param_groups, so the LR comes back as
+        # whatever it was when the previous run stopped -- and a cosine that
+        # RAN ITS FULL HORIZON ends at exactly 0.0. CosineAnnealingLR.step() is
+        # recursive in group["lr"], so fast-forwarding from 0 stays at 0 and the
+        # entire resumed run is a silent no-op that still prints plausible
+        # losses. Measured: resuming the 40-epoch gen_12d_scratch run reported
+        # "lr now 0.00e+00". Restore the base LR before fast-forwarding; the
+        # schedule then traces the new horizon from the right starting point.
+        for g, b in zip(opt.param_groups, sched.base_lrs):
+            g["lr"] = b
         # One continuous cosine over the NEW horizon rather than a warm restart
         # at peak LR: fast-forward the schedule to where this resume begins.
         for _ in range(args.start_epoch * max(1, N // args.batch)):
             sched.step()
+        lr_now = opt.param_groups[0]["lr"]
         print(f"  resumed at epoch {args.start_epoch}, lr now "
-              f"{opt.param_groups[0]['lr']:.2e} on a {args.epochs}-epoch cosine",
-              flush=True)
+              f"{lr_now:.2e} on a {args.epochs}-epoch cosine", flush=True)
+        if lr_now < 1e-9:
+            raise SystemExit(
+                f"resumed LR is {lr_now:.2e}, which would train nothing. "
+                f"--start-epoch {args.start_epoch} is at or past the end of the "
+                f"--epochs {args.epochs} cosine; raise --epochs so there is "
+                f"horizon left to anneal over.")
     amp = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if args.amp else \
           (lambda: torch.enable_grad())
 

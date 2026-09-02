@@ -69,6 +69,24 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gui-free", action="store_true", default=True,
                     help="only start from segments with no inventory frame")
+    ap.add_argument("--outdoor", action="store_true",
+                    help="Start on open ground with sky in frame. A random draw "
+                         "lands underground most of the time -- the corpus is "
+                         "mostly mining -- and in a dark cave a held W is "
+                         "invisible: no horizon, no parallax, nothing to move "
+                         "past. Filters on altitude and on sky actually being "
+                         "in shot, then ranks by how much.")
+    ap.add_argument("--min-alt", type=float, default=62.0,
+                    help="minimum ypos (pose column 3). Sea level is ~62, so "
+                         "this alone rejects most cave starts.")
+    ap.add_argument("--min-sky", type=float, default=0.15,
+                    help="minimum fraction of the frame's top quarter that is "
+                         "bright and blue-dominant")
+    ap.add_argument("--scan", type=int, default=6000,
+                    help="how many particles to consider before ranking")
+    ap.add_argument("--distinct-episodes", action="store_true", default=True,
+                    help="at most one start per source video, so the clips are "
+                         "different places rather than four views of one field")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -109,21 +127,76 @@ def main():
         raise SystemExit(f"assignment cond is {cond_all.shape[1]} but the "
                          f"generator wants {CTX*DIM}")
 
-    # pick starts, optionally avoiding inventory screens
+    segs = open_segments(args.cache)
+
+    # Pick starts. --outdoor matters more than it sounds: a random draw lands
+    # underground most of the time (the corpus is mostly mining), and in a dark
+    # cave you cannot SEE whether the model is walking forward -- there is no
+    # horizon, no parallax, nothing to move past. Open ground with sky in frame
+    # is the only place a held W is legible.
+    #
+    # Three filters, cheapest first:
+    #   * no inventory frame in the context window (gui.npy)
+    #   * altitude at or above sea level (pose.npy column 3 is ypos; caves sit
+    #     below ~62, and this rejects most of them without decoding a frame)
+    #   * sky actually visible: in the top quarter of the newest real frame,
+    #     the fraction of pixels that are both bright and blue-dominant
+    # then ranked by that sky fraction with mean luma as the tiebreak, and
+    # limited to one start per EPISODE so the clips are different places rather
+    # than four views of one field.
     rng = np.random.default_rng(args.seed)
     pool = np.arange(len(ci_all))
-    if args.gui_free:
-        gui = np.load(f"{args.cache}/gui.npy", mmap_mode="r")
-        keep = []
-        for p in rng.permutation(pool)[:4000]:
-            c, t = int(ci_all[p]), int(fi_all[p])
-            if not np.asarray(gui[c, t - CTX:t + 1]).any():
-                keep.append(p)
-            if len(keep) >= args.starts * 4:
+    gui = np.load(f"{args.cache}/gui.npy", mmap_mode="r") if args.gui_free else None
+    pose = np.load(f"{args.cache}/pose.npy", mmap_mode="r") if args.outdoor else None
+    epi = A.get("episode")
+    epi = epi.numpy() if epi is not None else None
+
+    scored, seen_ep = [], set()
+    for p in rng.permutation(pool)[: args.scan]:
+        c, t = int(ci_all[p]), int(fi_all[p])
+        if gui is not None and np.asarray(gui[c, t - CTX:t + 1]).any():
+            continue
+        if not args.outdoor:
+            scored.append((0.0, 0.0, int(p)))
+            if len(scored) >= args.starts * 4:
                 break
-        pool = np.array(keep) if keep else pool
-    sel = rng.choice(pool, size=args.starts, replace=False)
-    print(f"starts: particles {list(map(int, sel))}", flush=True)
+            continue
+        if float(pose[c, t, 3]) < args.min_alt:
+            continue
+        f = np.asarray(segs[c][t]).astype(np.float32)          # RGB
+        top = f[: max(1, f.shape[0] // 4)]
+        sky = float(((top[..., 2] > top[..., 0] + 8) & (top.mean(2) > 110)).mean())
+        if sky < args.min_sky:
+            continue
+        scored.append((sky, float(f.mean()), int(p)))
+    scored.sort(key=lambda r: (-r[0], -r[1]))
+
+    sel = []
+    for sky, luma, p in scored:
+        if epi is not None and args.distinct_episodes:
+            e = int(epi[p])
+            if e in seen_ep:
+                continue
+            seen_ep.add(e)
+        sel.append(p)
+        if len(sel) == args.starts:
+            break
+    if len(sel) < args.starts:
+        raise SystemExit(
+            f"only {len(sel)} start(s) passed the filters out of {args.scan} "
+            f"scanned. Loosen --min-sky / --min-alt, raise --scan, or drop "
+            f"--outdoor.")
+    sel = np.array(sel)
+    if args.outdoor:
+        info = {p: (s, l) for s, l, p in scored}
+        print("starts (outdoor-ranked):", flush=True)
+        for p in sel:
+            s, l = info[int(p)]
+            print(f"  particle {int(p):7d}  chunk {int(ci_all[p]):7d} "
+                  f"frame {int(fi_all[p]):3d}  ypos {float(pose[int(ci_all[p]), int(fi_all[p]), 3]):6.1f}"
+                  f"  sky {s:.2f}  luma {l:5.1f}", flush=True)
+    else:
+        print(f"starts: particles {list(map(int, sel))}", flush=True)
 
     press = [s.strip() for s in args.press.split(",") if s.strip()]
     unknown = [p for p in press if p.lower() not in {n.lower() for n in ACTION_NAMES[:10]}]
@@ -139,7 +212,6 @@ def main():
     h = cond_all[sel].to(dev).float().view(args.starts, CTX, DIM) / recw
 
     # the real frames the context came from, so the real->generated cut is visible
-    segs = open_segments(args.cache)
     real = np.stack([np.asarray(segs[int(ci_all[p])][int(fi_all[p]) - CTX:int(fi_all[p])])
                      for p in sel])                       # (S, CTX, 64, 64, 3)
 
