@@ -1,5 +1,27 @@
 #!/usr/bin/env bash
-# The 12-d action representation, assigned FROM SCRATCH.
+# The 12-d action representation, assigned FROM SCRATCH, on lag-corrected actions.
+#
+# THE ACTION LAG. Earlier runs conditioned target frame t on the action recorded
+# at tick t. That is one tick late: VPT stores (observation, action) in the
+# standard RL convention, so the action at tick t is chosen after seeing frame t
+# and produces frame t+1. The action that produces frame t is a_(t-1). Measured
+# two ways on this cache:
+#
+#   corr(|mouse|, |frame_t - frame_(t-1)|)  a_(t-2) 0.383  a_(t-1) 0.481  a_t 0.389
+#   signed horizontal image shift into t    dx_(t-1) -0.588     dx_t -0.477
+#   sign agreement of that shift            dx_(t-1) 69.4%      dx_t 61.7%
+#
+# The lag profile peaks at t-1 with a symmetric falloff, and only the SIGNED test
+# separates the two properly -- mouse motion is autocorrelated enough that the
+# wrong lag still scores 0.39, which is why this survived so long. It degraded
+# rather than broke.
+#
+# Why it forces a rerun rather than just a retrain: the action-side transport
+# built its k-NN neighbourhoods and its sixteen marginal groups from the WRONG
+# action per particle, so z was decorrelated from something other than the action
+# the generator will be handed. That is a mechanism for the one leak that never
+# closed -- dxsign sat at +2.46 after 384,000 steps against an explicit dxsign
+# grouping, because the correct turn signal had no reason to leave z.
 #
 # An earlier attempt resumed z from assign_ctx3_384k (step 352,000) on the
 # reasoning that context transport is representation-independent, so it could be
@@ -49,11 +71,11 @@ set -euo pipefail
 WT=/home/ubuntu/exp/newgen/.claude/worktrees/vpt-cache-hardening
 cd "$WT"
 PYTHONPATH=$WT /home/ubuntu/exp/newgen/.venv/bin/python scripts/run_assignment_vpt.py \
-  --particles /data/vpt/particles_dim256_512k_12d.pt \
+  --particles /data/vpt/particles_dim256_512k_12d_lag1.pt \
   --ctx-frames 3 --ctx-scales 1,3 --ctx-metric cosine \
   --act-groups w,a,s,d,space,shift,ctrl,e,attack,use,dxsign,dysign,dxmag,dymag,anyclick,moving \
   --steps 384000 --eval-every 2000 --save-every 16000 --keep-checkpoints \
   --k 3329 --k-act 13316 \
   --ctx-per-step 112 --act-per-step 24 --grp-per-step 96 \
   --max-group 8192 --cond-alpha 0.25 \
-  --out /data/aag_results/results_vpt/assign_12d_scratch/assignment.pt
+  --out /data/aag_results/results_vpt/assign_12d_lag1/assignment.pt

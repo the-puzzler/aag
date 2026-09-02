@@ -28,9 +28,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from aag.vpt_actions import (A_DIM, ACTION_NAMES, action_index_from_raw,
-                             action_marginals, apply_action_norm,
-                             build_action_raw, fit_action_norm)
+from aag.vpt_actions import (A_DIM, ACTION_LAG, ACTION_NAMES,
+                             action_index_from_raw, action_marginals,
+                             apply_action_norm, build_action_raw,
+                             fit_action_norm)
 
 
 def main():
@@ -39,6 +40,14 @@ def main():
     ap.add_argument("--cache", type=Path, default=Path("/data/vpt/cache_train"))
     ap.add_argument("--out", type=Path, default=None,
                     help="default: overwrite --particles in place (atomic via .tmp)")
+    ap.add_argument("--no-action-lag", action="store_true",
+                    help="Condition target frame t on the action recorded AT t "
+                         "instead of at t-1. This is what the original particle "
+                         "files did and it is off by one: frame t is produced by "
+                         "the action at t-1 (measured -- signed horizontal image "
+                         "shift correlates -0.588 with dx_(t-1) against -0.477 "
+                         "with dx_t, sign agreement 69.4% vs 61.7%). Only for "
+                         "reproducing the misaligned runs.")
     ap.add_argument("--allow-partial-clicks", action="store_true",
                     help="Proceed even if some particles sit on clips whose "
                          "clicks were never recovered. Off by default and it "
@@ -92,14 +101,26 @@ def main():
             f"failures), or pass --allow-partial-clicks if you have decided the "
             f"bias is acceptable.")
 
-    kv = np.stack([np.asarray(keys[c, t]) for c, t in zip(ch, fr)])
-    mv = np.stack([np.asarray(mouse[c, t]) for c, t in zip(ch, fr)])
-    cv = np.stack([np.asarray(clicks[c, t]) for c, t in zip(ch, fr)])
+    # ACTION_LAG: the action that produced target frame t was recorded at t-1.
+    # See aag/vpt_actions for the two measurements that establish this. The old
+    # particle files stored acts[c, t], which is one tick late -- the action
+    # chosen AFTER frame t, i.e. the one that produces t+1.
+    lag = 0 if args.no_action_lag else ACTION_LAG
+    ft = fr - lag
+    if (ft < 0).any():
+        raise SystemExit(f"{int((ft < 0).sum())} particles have frame < {lag}; "
+                         f"cannot apply the action lag")
+    kv = np.stack([np.asarray(keys[c, t]) for c, t in zip(ch, ft)])
+    mv = np.stack([np.asarray(mouse[c, t]) for c, t in zip(ch, ft)])
+    cv = np.stack([np.asarray(clicks[c, t]) for c, t in zip(ch, ft)])
     raw = build_action_raw(kv, mv, cv)
+    print(f"action lag {lag}: target frame t conditioned on the action at t-{lag}",
+          flush=True)
 
     # --- consistency: the recomputed 81-way must match what the builder cached
+    # at the SAME tick the action was read from, which is the lagged one.
     idx_new = action_index_from_raw(raw)
-    idx_old = np.stack([np.asarray(acts[c, t]) for c, t in zip(ch, fr)]).astype(np.int64)
+    idx_old = np.stack([np.asarray(acts[c, t]) for c, t in zip(ch, ft)]).astype(np.int64)
     agree = int((idx_new == idx_old).sum())
     print(f"81-way index recomputed from action_raw agrees with action_seqs on "
           f"{agree:,}/{N:,} ({100.0*agree/max(N,1):.3f}%)", flush=True)
@@ -134,6 +155,7 @@ def main():
     P["act_norm"] = norm
     P["act_names"] = list(ACTION_NAMES)
     P["act_dim"] = A_DIM
+    P["action_lag"] = lag
     P["clicks_coverage"] = float((N - n_bad) / max(N, 1))
 
     out = args.out or args.particles

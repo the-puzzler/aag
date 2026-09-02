@@ -72,6 +72,25 @@ MOUSE_W = 8.0        # mouse:all-keys variance ratio, from the pixel-change fit
 DX_DEADZONE = 5.0    # matches prepare_vpt_cache, so `turn`/`tilt` stay reproducible
 DY_DEADZONE = 5.0
 
+# The action that PRODUCES frame t is the one recorded at tick t-1, not tick t.
+# VPT stores (observation, action) per tick in the standard RL convention: the
+# record at tick t holds the action chosen after seeing frame t, so it moves the
+# world to frame t+1. Measured on the cache, two ways:
+#
+#   corr(|mouse|, |frame_t - frame_{t-1}|)   a_{t-2} 0.383  a_{t-1} 0.481  a_t 0.389
+#   signed horizontal image shift into t     dx_{t-1} -0.588   dx_t -0.477
+#   sign agreement of that shift             dx_{t-1} 69.4%    dx_t 61.7%
+#
+# The lag profile peaks at t-1 and falls off symmetrically, and the SIGNED test
+# separates them properly (a magnitude correlation cannot, because mouse motion
+# is autocorrelated enough that the wrong lag still scores 0.39).
+#
+# This is also the interactive semantics: the player sees the latest frame,
+# presses a key, and the next frame is the result. So conditioning frame t on
+# a_{t-1} is what a live controller does, and training on a_t would mean the
+# demo is driven by an action one tick out of step with what it renders.
+ACTION_LAG = 1
+
 
 def build_action_raw(keys, mouse, clicks) -> np.ndarray:
     """(N,8) keys + (N,2) mouse + (N,2) clicks -> (N,12) float32 physical vector.
