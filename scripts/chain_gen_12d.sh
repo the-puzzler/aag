@@ -45,7 +45,11 @@ GEN=/data/aag_results/results_vpt/gen_12d_scratch
 cd "$WT" || exit 1
 
 echo "=== waiting for the 12-d assignment $(date -u +%H:%M:%S) ==="
-while pgrep -f "scripts/run_assignment_vpt.py" > /dev/null; do sleep 120; done
+# The bracket keeps this pattern from matching processes that merely MENTION the
+# script -- including any watcher built around the same pgrep. That self-match
+# cost 6.9 h of idle GPU once: a helper whose own command line contained the
+# literal string blocked this wait long after the assignment had finished.
+while pgrep -f "[r]un_assignment_vpt\.py" > /dev/null; do sleep 120; done
 echo "=== assignment process gone $(date -u +%H:%M:%S) ==="
 
 # "saved ->" only appears on the FINAL save, so this distinguishes completion
