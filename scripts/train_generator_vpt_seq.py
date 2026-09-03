@@ -96,6 +96,22 @@ def main():
                          "from the rollout loop entirely -- generated pixels go "
                          "straight back in, through an encoder trained on that "
                          "exact path.")
+    ap.add_argument("--ctx-frames", type=int, default=0,
+                    help="Override the context length instead of deriving it "
+                         "from the assignment's cond width. Only meaningful with "
+                         "--pixel-context, where the generator reads FRAMES and "
+                         "the assignment's cond is used for nothing but this "
+                         "derivation. The particles were built with 24 frames, so "
+                         "anything up to 24 is available without rebuilding. On "
+                         "--resume the positional embedding is expanded to match "
+                         "(see below), so a 3-frame generator can be finetuned at "
+                         "9 frames.\n"
+                         "Note on independence: the assignment decorrelated z "
+                         "against the 3-frame context, not a 9-frame one. That is "
+                         "expected to hold rather than assumed to -- the ctx3 "
+                         "lineage transported against scales 1 and 3 only and "
+                         "measured independence at 5/12/24 frames (0.793/0.862/"
+                         "0.907), which is the collider argument working.")
     ap.add_argument("--pix-ch", type=int, default=64,
                     help="base width of the pixel context encoder")
     ap.add_argument("--pix-depth", type=int, default=0,
@@ -193,6 +209,17 @@ def main():
     N, dim_z = z.shape
     DIM = int(A.get("dim") or 256)
     CTX = cond.shape[1] // DIM
+    CTX_ASG = CTX
+    if args.ctx_frames:
+        if not args.pixel_context and not args.finetune_ae_enc:
+            raise SystemExit("--ctx-frames only works with a learned context "
+                             "encoder; with AE-latent context the window comes "
+                             "from the assignment's cond and cannot be widened "
+                             "without rebuilding particles")
+        CTX = args.ctx_frames
+        print(f"  context OVERRIDDEN to {CTX} frames (assignment cond carries "
+              f"{CTX_ASG}); the generator reads frames, so cond is only used to "
+              f"derive the default", flush=True)
     lag = int(A.get("action_lag", ACTION_LAG))
     print(f"{N:,} particles  z {dim_z}  cond {cond.shape[1]} = {CTX} x {DIM}  "
           f"action_lag {lag}", flush=True)
@@ -343,7 +370,29 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * spe)
     if args.resume is not None:
         rk = torch.load(args.resume, map_location=dev, weights_only=False)
-        model.load_state_dict(rk["model_state_dict"])
+        rsd = rk["model_state_dict"]
+        old_ctx = int(rk.get("ctx_frames", CTX))
+        if old_ctx != CTX and "pos" in rsd:
+            # pos layout is [z, ctx_0 .. ctx_(C-1), action], oldest context
+            # first. Widening the window must keep the NEWEST slots exact --
+            # they carry most of the signal -- so the last old_ctx context
+            # embeddings are copied onto the last old_ctx new ones and the
+            # additional older slots are seeded from the oldest learned one.
+            # Interpolating instead would perturb the newest slot, which is the
+            # one the single-frame independence result says matters most.
+            op = rsd["pos"]                       # (1, old_ctx+2, D)
+            npos = model.pos.data.clone()         # (1, CTX+2, D)
+            npos[:, 0] = op[:, 0]                 # z token
+            npos[:, -1] = op[:, -1]               # action token
+            for j in range(old_ctx):
+                npos[:, CTX - old_ctx + 1 + j] = op[:, 1 + j]
+            for j in range(CTX - old_ctx):
+                npos[:, 1 + j] = op[:, 1]         # seed the extra older slots
+            rsd = dict(rsd)
+            rsd["pos"] = npos
+            print(f"  positional embedding expanded {old_ctx} -> {CTX} context "
+                  f"slots, newest slots preserved exactly", flush=True)
+        model.load_state_dict(rsd)
         print(f"resumed generator from {args.resume} (epoch {rk.get('epoch')})",
               flush=True)
         if rk.get("enc_pix_state_dict") is not None and enc_pix is not None:
@@ -365,6 +414,22 @@ def main():
                       "parameter groups than the checkpoint (a context encoder "
                       "was added). Weights are loaded; Adam moments restart.",
                       flush=True)
+        # Adam's moments are per-parameter and shaped like it, so any parameter
+        # that CHANGED SHAPE on resume carries moments that no longer fit and
+        # the fused update raises "size of tensor a must match tensor b". That
+        # happens whenever the positional embedding is widened by --ctx-frames.
+        # Drop the state for those parameters only; every other parameter keeps
+        # its moments, which is the whole reason to restore the optimiser.
+        dropped = 0
+        for grp in opt.param_groups:
+            for prm in grp["params"]:
+                st = opt.state.get(prm)
+                if st and "exp_avg" in st and st["exp_avg"].shape != prm.shape:
+                    opt.state.pop(prm)
+                    dropped += 1
+        if dropped:
+            print(f"  dropped stale Adam moments for {dropped} reshaped "
+                  f"parameter(s); the rest kept theirs", flush=True)
         # load_state_dict overwrites param_groups, and a cosine that ran its FULL
         # horizon ends at exactly 0.0. CosineAnnealingLR.step() is recursive in
         # group["lr"], so fast-forwarding from 0 stays at 0 and the whole finetune

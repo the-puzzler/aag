@@ -124,7 +124,11 @@ def main():
         raise SystemExit("no act_norm in checkpoint or assignment -- cannot encode "
                          "a live action the way the generator was trained")
     cond_all, ci_all, fi_all = A["cond"], A["chunk"].numpy(), A["frame"].numpy()
-    if cond_all.shape[1] != CTX * DIM:
+    # Only meaningful for AE-latent context. A pixel-context generator reads
+    # FRAMES, so its context length is free to differ from the assignment's cond
+    # width -- which is exactly what --ctx-frames does.
+    if not (C.get("pixel_context") or C.get("finetune_ae_enc")) \
+            and cond_all.shape[1] != CTX * DIM:
         raise SystemExit(f"assignment cond is {cond_all.shape[1]} but the "
                          f"generator wants {CTX*DIM}")
 
