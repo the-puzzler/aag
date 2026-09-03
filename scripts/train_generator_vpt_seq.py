@@ -96,6 +96,26 @@ def main():
                          "exact path.")
     ap.add_argument("--pix-ch", type=int, default=64,
                     help="base width of the pixel context encoder")
+    ap.add_argument("--finetune-ae-enc", action="store_true",
+                    help="Like --pixel-context but reuse the AE's OWN encoder as "
+                         "the context encoder and fine-tune it, instead of "
+                         "training a fresh one. Better on two counts: it starts "
+                         "from features that already work, and it STAYS NEAR the "
+                         "space the assignment decorrelated z against, so it "
+                         "shrinks the independence risk a from-scratch encoder "
+                         "simply accepts. What it fixes is exactly the AE's "
+                         "inability to cope with its own generated input: the "
+                         "encoder gets gradient from the NEXT step's loss, i.e. "
+                         "'encode generated frames so the generator can predict "
+                         "well from them'. Only the encoder moves -- the AE "
+                         "decoder is not in the generator path at all. Mutually "
+                         "exclusive with --pixel-context.")
+    ap.add_argument("--ae-lr", type=float, default=3e-5,
+                    help="LR for the fine-tuned AE encoder. Deliberately ~1/10 of "
+                         "--lr: how far this encoder drifts is how far the "
+                         "generator's context moves from what z was decorrelated "
+                         "against, so it is a knob trading robustness against the "
+                         "validity of that independence.")
     ap.add_argument("--bptt", action="store_true",
                     help="keep the graph across rollout steps (backprop through "
                          "the AE encoder). Costs L x activations; off by default.")
@@ -224,18 +244,48 @@ def main():
                                  image_size=args.image_size).to(dev)
     print(f"generator params: {sum(p.numel() for p in model.parameters()):,}",
           flush=True)
+    if args.pixel_context and args.finetune_ae_enc:
+        raise SystemExit("--pixel-context and --finetune-ae-enc both replace the "
+                         "context encoder; pick one")
     enc_pix = None
+    enc_groups = []
     params = list(model.parameters())
     if args.pixel_context:
         enc_pix = PixelContextEncoder(ctx_dim=DIM, ch=args.pix_ch,
                                       image_size=args.image_size).to(dev)
         params += list(enc_pix.parameters())
-        print(f"pixel context encoder: "
+        print(f"pixel context encoder (fresh): "
               f"{sum(p.numel() for p in enc_pix.parameters()):,} params; the "
               f"frozen AE is now used ONLY by the assignment, and not at all in "
               f"the rollout loop", flush=True)
+    elif args.finetune_ae_enc:
+        # The AE's own encoder becomes the context encoder, and trains. Only the
+        # encoder: ae.dec is not in the generator path at all.
+        enc_pix = ae.enc
+        for prm in enc_pix.parameters():
+            prm.requires_grad_(True)
+        enc_groups = [{"params": list(enc_pix.parameters()), "lr": args.ae_lr}]
+        print(f"fine-tuning the AE encoder as the context encoder: "
+              f"{sum(p.numel() for p in enc_pix.parameters()):,} params at lr "
+              f"{args.ae_lr:.1e} (generator at {args.lr:.1e}). Starts from "
+              f"working features and stays near the space z was decorrelated "
+              f"against.", flush=True)
+    def encode_ctx(frames):
+        """(B, T, 3, H, W) -> (B, T*DIM), for either encoder kind.
+
+        PixelContextEncoder takes the time axis itself; the AE's encoder is a
+        plain image encoder, so the frames are folded into the batch and unfolded
+        after. Its per-image output is (latent_channels, grid, grid), which
+        flattens to exactly DIM.
+        """
+        B, T = frames.shape[:2]
+        if args.pixel_context:
+            return enc_pix(frames).reshape(B, -1)
+        out = enc_pix(frames.reshape(B * T, *frames.shape[2:]))
+        return out.reshape(B, -1)
+
     perceptual = lpips.LPIPS(net="vgg").to(dev).eval()
-    opt = torch.optim.Adam(params, lr=args.lr)
+    opt = torch.optim.Adam([{"params": params, "lr": args.lr}] + enc_groups)
     spe = max(1, N // args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * spe)
     amp = ((lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if args.amp
@@ -293,7 +343,7 @@ def main():
                 a0 = torch.from_numpy(gather_actions(b, 1)[:, 0]).to(dev)
                 if enc_pix is not None:
                     px = gather_ctx_pixels(b).to(dev, non_blocking=True)
-                    cvec = enc_pix(px).reshape(len(b), -1)
+                    cvec = encode_ctx(px)
                 else:
                     cvec = cond[bt]
                 inp = torch.cat([z[bt], cvec, a0], 1)
@@ -328,7 +378,7 @@ def main():
             for s in range(L):
                 zz = torch.randn(len(bs), dim_z, device=dev)
                 if enc_pix is not None:
-                    cvec = enc_pix(ctx_px).reshape(len(bs), -1)
+                    cvec = encode_ctx(ctx_px)
                 else:
                     cvec = (h * recw).reshape(len(bs), -1)
                 inp = torch.cat([zz, cvec, acts[:, s]], 1)
@@ -340,6 +390,12 @@ def main():
                 step_acc[s] += float(m); step_n[s] += 1
                 tot_sm += float(m)
                 if s + 1 < L and enc_pix is not None:
+                    # Detach the PIXELS, never the encoder. The window holds
+                    # frames and enc_pix is re-run on it every step, so the next
+                    # step's loss still reaches the encoder's weights -- which is
+                    # the whole point when that encoder is being fine-tuned. The
+                    # detach only removes backprop into the generator through its
+                    # own earlier prediction, i.e. BPTT.
                     nxt = pred.clamp(-1, 1).float().unsqueeze(1)
                     if args.bptt:
                         ctx_px = torch.cat([ctx_px[:, 1:], nxt], 1)
@@ -387,6 +443,8 @@ def main():
                     "act_norm": act_norm, "act_names": A.get("act_names"),
                     "action_lag": lag, "seq_len": L, "seq_prob": args.seq_prob,
                     "pixel_context": args.pixel_context, "pix_ch": args.pix_ch,
+                    "finetune_ae_enc": args.finetune_ae_enc, "ae_lr": args.ae_lr,
+                    "ae_checkpoint": str(args.ae),
                     "enc_pix_state_dict": (enc_pix.state_dict()
                                            if enc_pix is not None else None),
                     "opt_state_dict": opt.state_dict(),
