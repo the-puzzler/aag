@@ -29,6 +29,7 @@ import torch
 from aag.ae import AutoEncoder
 from aag.datasets import open_segments
 from aag.generator import TransformerGenerator
+from aag.vpt_rollout import ContextWindow
 from aag.vpt_actions import ACTION_NAMES, encode_live
 
 # (label, pressed-set, dx, dy)
@@ -115,8 +116,9 @@ def main():
         raise SystemExit(f"only {len(sel)} outdoor starts found")
     print(f"starts: {sel}", flush=True)
 
-    recw = torch.tensor(np.sqrt(0.95 ** np.arange(CTX - 1, -1, -1)),
-                        dtype=torch.float32, device=dev).view(1, CTX, 1)
+    # the checkpoint says which context it was trained with; honour it
+    win = ContextWindow(C, ae, dev, CTX, DIM, image_size=C["image_size"])
+    print(f"  {win.describe()}", flush=True)
     V = len(VARIANTS)
     acts = torch.stack([torch.from_numpy(encode_live(pr, dx, dy, act_norm))
                         for _, pr, dx, dy in VARIANTS]).float().to(dev)   # (V,12)
@@ -125,18 +127,24 @@ def main():
         # ONE z sequence, reused across every variant -- this is what makes the
         # difference attributable to the action
         zs = [torch.randn(1, dim_z, device=dev, generator=None) for _ in range(args.steps)]
-        h0 = cond_all[p:p + 1].to(dev).float().view(1, CTX, DIM) / recw
+        c, t = int(ci[p]), int(fi[p])
+        ctx_real = (torch.from_numpy(np.asarray(segs[c][t - CTX:t]).copy())
+                    .permute(0, 3, 1, 2).float().div_(127.5).sub_(1.0)
+                    .unsqueeze(0).to(dev))
+        cond_row = cond_all[p:p + 1].to(dev).float()
         frames = np.zeros((args.steps, V, 64, 64, 3), np.uint8)
         with torch.no_grad():
             for vi in range(V):
-                h = h0.clone()
+                # re-initialise the window per variant so every variant starts
+                # from an identical context, as it must for the comparison
+                win.init(cond_row if win.mode == "ae_latent" else None,
+                         ctx_real if win.mode != "ae_latent" else None)
                 a = acts[vi:vi + 1]
                 for s in range(args.steps):
-                    inp = torch.cat([zs[s], (h * recw).reshape(1, -1), a], 1)
+                    inp = torch.cat([zs[s], win.vector(), a], 1)
                     pred = model(inp).clamp(-1, 1)
                     frames[s, vi] = to_u8(pred)[0]
-                    hn = ae.enc(pred.float()).view(1, 1, DIM).float()
-                    h = torch.cat([h[:, 1:], hn], 1)
+                    win.push(pred)
 
         f = frames.astype(np.float32)
         ref = f[:, 0]                                       # idle

@@ -35,6 +35,7 @@ import torch
 from aag.ae import AutoEncoder
 from aag.datasets import open_segments
 from aag.generator import TransformerGenerator
+from aag.vpt_rollout import ContextWindow
 from aag.vpt_actions import ACTION_NAMES, encode_live
 
 
@@ -207,13 +208,20 @@ def main():
     print(f"  encoded 12-d: {np.round(av, 3)}", flush=True)
     act = torch.from_numpy(av).float().to(dev).unsqueeze(0).repeat(args.starts, 1)
 
-    recw = torch.tensor(np.sqrt(0.95 ** np.arange(CTX - 1, -1, -1)),
-                        dtype=torch.float32, device=dev).view(1, CTX, 1)
-    h = cond_all[sel].to(dev).float().view(args.starts, CTX, DIM) / recw
-
-    # the real frames the context came from, so the real->generated cut is visible
+    # the real frames the context came from, so the real->generated cut is
+    # visible AND so a pixel-context checkpoint can be initialised properly
     real = np.stack([np.asarray(segs[int(ci_all[p])][int(fi_all[p]) - CTX:int(fi_all[p])])
                      for p in sel])                       # (S, CTX, 64, 64, 3)
+
+    # Which context a checkpoint wants is recorded in the checkpoint. Rendering
+    # a pixel-context or fine-tuned-encoder model through the ORIGINAL frozen AE
+    # would silently measure a model that was never trained.
+    win = ContextWindow(C, ae, dev, CTX, DIM, image_size=C["image_size"])
+    print(f"  {win.describe()}", flush=True)
+    real_t = (torch.from_numpy(real).permute(0, 1, 4, 2, 3).float()
+              .div_(127.5).sub_(1.0).to(dev))
+    win.init(cond_all[sel].to(dev).float() if win.mode == "ae_latent" else None,
+             real_t if win.mode != "ae_latent" else None)
 
     frames = []
     for k in range(CTX):                                  # real context, BGR
@@ -222,11 +230,10 @@ def main():
         z_held = torch.randn(args.starts, dim_z, device=dev)
         for _ in range(n_frames):
             z = z_held if args.fixed_z else torch.randn(args.starts, dim_z, device=dev)
-            cc = torch.cat([z, (h * recw).reshape(args.starts, -1), act], 1)
+            cc = torch.cat([z, win.vector(), act], 1)
             pred = model(cc).clamp(-1, 1)
             frames.append(to_u8(pred))
-            hn = ae.enc(pred).view(args.starts, 1, DIM).float()
-            h = torch.cat([h[:, 1:], hn], 1)
+            win.push(pred)
 
     S = args.scale
     tileH = frames[0].shape[1] * S
