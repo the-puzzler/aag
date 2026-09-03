@@ -38,9 +38,14 @@ class ContextWindow:
         self.mode = "pixel" if (self.pixel_ctx or self.ft_ae) else "ae_latent"
         self.enc = None
         if self.pixel_ctx:
+            # depth must come from the checkpoint too: rebuilding at the
+            # default depth would fail to load the state dict, or worse, load a
+            # differently-shaped encoder if the default ever changes
             self.enc = PixelContextEncoder(ctx_dim=ctx_dim,
                                            ch=int(ckpt.get("pix_ch", 64)),
-                                           image_size=image_size).to(dev).eval()
+                                           image_size=image_size,
+                                           depth=int(ckpt.get("pix_depth", 0))
+                                           ).to(dev).eval()
             sd = ckpt.get("enc_pix_state_dict")
             if sd is None:
                 raise SystemExit("checkpoint says pixel_context but carries no "

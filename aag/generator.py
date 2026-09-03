@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .ae import ResidualDecoder
 
@@ -90,16 +91,39 @@ class PixelContextEncoder(nn.Module):
     learn any per-slot scaling it wants.
     """
 
+    class _ResBlock(nn.Module):
+        """3x3 -> 3x3 residual at constant resolution and width."""
+
+        def __init__(self, c: int):
+            super().__init__()
+            self.n1 = nn.GroupNorm(8, c)
+            self.c1 = nn.Conv2d(c, c, 3, 1, 1)
+            self.n2 = nn.GroupNorm(8, c)
+            self.c2 = nn.Conv2d(c, c, 3, 1, 1)
+
+        def forward(self, x):
+            h = self.c1(F.gelu(self.n1(x)))
+            h = self.c2(F.gelu(self.n2(h)))
+            return x + h
+
     def __init__(self, ctx_dim: int = 256, ch: int = 64, image_size: int = 64,
-                 in_ch: int = 3):
+                 in_ch: int = 3, depth: int = 0):
+        """depth = residual blocks per resolution stage.
+
+        depth=0 reproduces the original 4-layer stack. Above that the parameters
+        buy DEPTH rather than only width, which is the better trade at 64x64: a
+        4-layer stack widened to 11M is very wide and very shallow, and the job
+        here is to extract motion-bearing features from three frames, not to
+        memorise a wide basis.
+        """
         super().__init__()
         c1, c2, c3, c4 = ch, ch * 2, ch * 4, ch * 4
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, c1, 4, 2, 1), nn.GroupNorm(8, c1), nn.GELU(),   # 32
-            nn.Conv2d(c1, c2, 4, 2, 1), nn.GroupNorm(8, c2), nn.GELU(),      # 16
-            nn.Conv2d(c2, c3, 4, 2, 1), nn.GroupNorm(8, c3), nn.GELU(),      # 8
-            nn.Conv2d(c3, c4, 4, 2, 1), nn.GroupNorm(8, c4), nn.GELU(),      # 4
-        )
+        layers = []
+        for cin, cout in ((in_ch, c1), (c1, c2), (c2, c3), (c3, c4)):
+            layers += [nn.Conv2d(cin, cout, 4, 2, 1), nn.GroupNorm(8, cout),
+                       nn.GELU()]
+            layers += [PixelContextEncoder._ResBlock(cout) for _ in range(depth)]
+        self.net = nn.Sequential(*layers)
         self.head = nn.Linear(c4 * (image_size // 16) ** 2, ctx_dim)
         self.ctx_dim = ctx_dim
 

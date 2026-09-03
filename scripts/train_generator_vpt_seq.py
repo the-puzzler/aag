@@ -96,6 +96,12 @@ def main():
                          "exact path.")
     ap.add_argument("--pix-ch", type=int, default=64,
                     help="base width of the pixel context encoder")
+    ap.add_argument("--pix-depth", type=int, default=0,
+                    help="residual blocks per resolution stage in the pixel "
+                         "context encoder. 0 is the original 4-layer stack; "
+                         "above that the parameters buy depth rather than only "
+                         "width, which is the better trade at 64x64. ch=96 "
+                         "depth=1 is 11.56M.")
     ap.add_argument("--finetune-ae-enc", action="store_true",
                     help="Like --pixel-context but reuse the AE's OWN encoder as "
                          "the context encoder and fine-tune it, instead of "
@@ -267,7 +273,8 @@ def main():
     params = list(model.parameters())
     if args.pixel_context:
         enc_pix = PixelContextEncoder(ctx_dim=DIM, ch=args.pix_ch,
-                                      image_size=args.image_size).to(dev)
+                                      image_size=args.image_size,
+                                      depth=args.pix_depth).to(dev)
         params += list(enc_pix.parameters())
         print(f"pixel context encoder (fresh): "
               f"{sum(p.numel() for p in enc_pix.parameters()):,} params; the "
@@ -494,6 +501,7 @@ def main():
                     "act_norm": act_norm, "act_names": A.get("act_names"),
                     "action_lag": lag, "seq_len": L, "seq_prob": args.seq_prob,
                     "pixel_context": args.pixel_context, "pix_ch": args.pix_ch,
+                    "pix_depth": args.pix_depth,
                     "finetune_ae_enc": args.finetune_ae_enc, "ae_lr": args.ae_lr,
                     "ae_checkpoint": str(args.ae),
                     "enc_pix_state_dict": (enc_pix.state_dict()
