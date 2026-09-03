@@ -55,6 +55,8 @@ import torch.nn.functional as F
 
 from aag.ae import AutoEncoder
 from aag.datasets import open_segments
+from aag.discriminator import (NLayerDiscriminator, adaptive_weight,
+                               paired_batch, paired_d_loss, paired_g_loss)
 from aag.generator import PixelContextEncoder, TransformerGenerator
 from aag.vpt_actions import (ACTION_LAG, apply_action_norm, build_action_raw)
 
@@ -136,6 +138,25 @@ def main():
     ap.add_argument("--lpips-weight", type=float, default=0.5)
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--eval-every", type=int, default=1)
+    ap.add_argument("--gan-weight", type=float, default=0.0,
+                    help="Paired adversary weight. The critic is shown the real "
+                         "frame and the generated one for the SAME z, context and "
+                         "action, stacked on the channel axis in random order, and "
+                         "asked which is the true continuation -- a far better "
+                         "posed question than judging realism in isolation, and it "
+                         "needs no conditioning input because the pairing carries "
+                         "it. In a sequence batch every step has its exact real "
+                         "counterpart, so the adversary applies at EVERY rollout "
+                         "step, not just the first.")
+    ap.add_argument("--gan-start-epoch", type=int, default=1,
+                    help="1 means from the first epoch, which is right for a "
+                         "FINETUNE off a converged generator -- the usual reason "
+                         "to delay is that a randomly-initialised generator gives "
+                         "the critic nothing to learn from, and that does not "
+                         "apply here.")
+    ap.add_argument("--gan-layers", type=int, default=2)
+    ap.add_argument("--gan-ndf", type=int, default=64)
+    ap.add_argument("--gan-lr", type=float, default=4.5e-5)
     ap.add_argument("--resume", type=Path, default=None,
                     help="Load a converged plain generator and fine-tune it. "
                          "THIS IS THE INTENDED USE: the pipeline order is "
@@ -292,6 +313,16 @@ def main():
               f"{args.ae_lr:.1e} (generator at {args.lr:.1e}). Starts from "
               f"working features and stays near the space z was decorrelated "
               f"against.", flush=True)
+    disc = opt_d = None
+    if args.gan_weight > 0:
+        disc = NLayerDiscriminator(6, args.gan_ndf, args.gan_layers).to(dev)
+        opt_d = torch.optim.Adam(disc.parameters(), lr=args.gan_lr,
+                                 betas=(0.5, 0.9))
+        print(f"paired adversary on: weight={args.gan_weight}, "
+              f"start_epoch={args.gan_start_epoch}, lr={args.gan_lr:.1e}, "
+              f"disc params {sum(p.numel() for p in disc.parameters()):,}",
+              flush=True)
+
     def encode_ctx(frames):
         """(B, T, 3, H, W) -> (B, T*DIM), for either encoder kind.
 
@@ -318,6 +349,11 @@ def main():
         if rk.get("enc_pix_state_dict") is not None and enc_pix is not None:
             enc_pix.load_state_dict(rk["enc_pix_state_dict"])
             print("  context encoder restored from the checkpoint too", flush=True)
+        if disc is not None and rk.get("disc_state_dict") is not None:
+            disc.load_state_dict(rk["disc_state_dict"])
+            if opt_d is not None and rk.get("opt_d_state_dict"):
+                opt_d.load_state_dict(rk["opt_d_state_dict"])
+            print("  critic and its optimiser restored", flush=True)
         if rk.get("opt_state_dict"):
             try:
                 opt.load_state_dict(rk["opt_state_dict"])
@@ -384,6 +420,14 @@ def main():
         if enc_pix is not None:
             enc_pix.train()
         seq_on = ep >= args.seq_warmup
+        gan_on = disc is not None and (ep + 1) >= args.gan_start_epoch
+        tot_g = tot_w = tot_d = 0.0
+        n_g = 0.0
+        dgen = torch.Generator(device=dev)
+        dgen.manual_seed(args.seed * 1000 + ep)
+        # the output conv the adaptive weight probes; taking it once per epoch
+        # keeps the hot loop free of attribute walks
+        last_w = model.dec.net[-1].weight
         perm = rng.permutation(N)
         tot_m = tot_l = n_b = 0.0
         tot_sm = n_sb = 0.0
@@ -411,7 +455,21 @@ def main():
                     m = F.mse_loss(pred, x)
                     l = perceptual(pred.clamp(-1, 1), x).mean()
                     loss = m + args.lpips_weight * l
+                if gan_on:
+                    with amp():
+                        pair, lab = paired_batch(x, pred, dgen)
+                        g = paired_g_loss(disc(pair), lab)
+                    w = adaptive_weight(loss, g, last_w) * args.gan_weight
+                    loss = loss + w * g
+                    tot_g += float(g); tot_w += float(w); n_g += 1
                 loss.backward(); opt.step(); sched.step()
+                if gan_on:
+                    opt_d.zero_grad(set_to_none=True)
+                    with amp():
+                        pair, lab = paired_batch(x, pred.detach(), dgen)
+                        d = paired_d_loss(disc(pair), lab)
+                    d.backward(); opt_d.step()
+                    tot_d += float(d)
                 tot_m += float(m); tot_l += float(l); n_b += 1
                 continue
 
@@ -433,6 +491,7 @@ def main():
                 h = cond[bt].view(len(bs), CTX, DIM) / recw
             opt.zero_grad(set_to_none=True)
             seq_loss = 0.0
+            gan_pairs = []          # (real, fake.detach()) per step, for the critic
             for s in range(L):
                 zz = torch.randn(len(bs), dim_z, device=dev)
                 if enc_pix is not None:
@@ -445,6 +504,19 @@ def main():
                     m = F.mse_loss(pred, tgts[:, s])
                     l = perceptual(pred.clamp(-1, 1), tgts[:, s]).mean()
                     seq_loss = seq_loss + m + args.lpips_weight * l
+                if gan_on:
+                    # every rollout step has its exact real counterpart, so the
+                    # adversary applies at each one. The adaptive weight is
+                    # computed against THIS step's reconstruction loss, so the
+                    # balance holds even though later steps are harder.
+                    rec_s = m + args.lpips_weight * l
+                    with amp():
+                        pair, lab = paired_batch(tgts[:, s], pred, dgen)
+                        g = paired_g_loss(disc(pair), lab)
+                    w = adaptive_weight(rec_s, g, last_w) * args.gan_weight
+                    seq_loss = seq_loss + w * g
+                    tot_g += float(g); tot_w += float(w); n_g += 1
+                    gan_pairs.append((tgts[:, s], pred.detach()))
                 step_acc[s] += float(m); step_n[s] += 1
                 tot_sm += float(m)
                 if s + 1 < L and enc_pix is not None:
@@ -477,6 +549,20 @@ def main():
                         h = torch.cat([h[:, 1:].detach(), hn], 1)
             (seq_loss / L).backward()
             opt.step(); sched.step()
+            if gan_on and gan_pairs:
+                # ONE critic update per generator update, over every step's pair
+                # concatenated -- keeps the update ratio the same as the
+                # single-step case while using all L steps of signal. The critic
+                # is small, so L times its forward is cheap next to the
+                # generator's.
+                reals = torch.cat([r for r, _ in gan_pairs], 0)
+                fakes = torch.cat([f for _, f in gan_pairs], 0)
+                opt_d.zero_grad(set_to_none=True)
+                with amp():
+                    pair, lab = paired_batch(reals, fakes, dgen)
+                    d = paired_d_loss(disc(pair), lab)
+                d.backward(); opt_d.step()
+                tot_d += float(d)
             n_sb += 1
 
         el = time.time() - t0
@@ -487,8 +573,15 @@ def main():
         curve["seq_mse"].append(tot_sm / max(n_sb * L, 1))
         curve["per_step"].append(per_step)
         ps = "  ".join(f"{v:.4f}" for v in per_step) if seq_on else "(warmup)"
+        gstr = ""
+        if gan_on and n_g:
+            gstr = (f"  g={tot_g/n_g:.4f} w={tot_w/n_g:.4f} "
+                    f"d={tot_d/max(n_b+n_sb,1):.4f}")
+            curve.setdefault("g", []).append(tot_g / n_g)
+            curve.setdefault("w", []).append(tot_w / n_g)
+            curve.setdefault("d", []).append(tot_d / max(n_b + n_sb, 1))
         print(f"epoch {ep+1}/{args.epochs}  step0_mse={mse_e:.5f} "
-              f"lpips={lp_e:.5f}  seq_mse={curve['seq_mse'][-1]:.5f}  "
+              f"lpips={lp_e:.5f}  seq_mse={curve['seq_mse'][-1]:.5f}{gstr}  "
               f"[{el/60:.1f}m]\n  per-step mse: {ps}", flush=True)
         (args.out / "gen_curve.json").write_text(json.dumps(curve))
         torch.save({"model_state_dict": model.state_dict(), "epoch": ep + 1,
@@ -497,7 +590,7 @@ def main():
                     "arch": "transformer", "d_model": args.d_model,
                     "depth": args.depth, "heads": args.heads,
                     "image_size": args.image_size, "act_dim": 12,
-                    "action_onehot": False, "gan_weight": 0.0,
+                    "action_onehot": False,
                     "act_norm": act_norm, "act_names": A.get("act_names"),
                     "action_lag": lag, "seq_len": L, "seq_prob": args.seq_prob,
                     "pixel_context": args.pixel_context, "pix_ch": args.pix_ch,
@@ -506,6 +599,11 @@ def main():
                     "ae_checkpoint": str(args.ae),
                     "enc_pix_state_dict": (enc_pix.state_dict()
                                            if enc_pix is not None else None),
+                    "gan_weight": args.gan_weight,
+                    "disc_state_dict": (disc.state_dict()
+                                        if disc is not None else None),
+                    "opt_d_state_dict": (opt_d.state_dict()
+                                         if opt_d is not None else None),
                     "opt_state_dict": opt.state_dict(),
                     "mse": mse_e, "lpips": lp_e,
                     "assignment": str(args.assignment)},
