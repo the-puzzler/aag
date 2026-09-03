@@ -55,7 +55,7 @@ import torch.nn.functional as F
 
 from aag.ae import AutoEncoder
 from aag.datasets import open_segments
-from aag.generator import TransformerGenerator
+from aag.generator import PixelContextEncoder, TransformerGenerator
 from aag.vpt_actions import (ACTION_LAG, apply_action_norm, build_action_raw)
 
 
@@ -80,6 +80,22 @@ def main():
                     help="epochs of pure single-step before sequence batches "
                          "start. Rolling a randomly-initialised model on its own "
                          "output supervises against noise.")
+    ap.add_argument("--pixel-context", action="store_true",
+                    help="Condition on the context FRAMES through a learned "
+                         "encoder instead of the frozen AE latents. The "
+                         "assignment is untouched -- it still supplies z, which "
+                         "is all it is needed for; conditioning at generator "
+                         "train time is free. The encoder emits ctx_dim per "
+                         "frame so it drops into the existing emb_ctx with no "
+                         "architectural change. Motivation: one AE encode-decode "
+                         "destroys 6.55 mean |pixel| against a real frame step of "
+                         "7.16, and velocity lives in the DIFFERENCE between "
+                         "consecutive context vectors. It also removes the AE "
+                         "from the rollout loop entirely -- generated pixels go "
+                         "straight back in, through an encoder trained on that "
+                         "exact path.")
+    ap.add_argument("--pix-ch", type=int, default=64,
+                    help="base width of the pixel context encoder")
     ap.add_argument("--bptt", action="store_true",
                     help="keep the graph across rollout steps (backprop through "
                          "the AE encoder). Costs L x activations; off by default.")
@@ -172,6 +188,15 @@ def main():
         x = torch.from_numpy(out).permute(0, 1, 4, 2, 3).float()
         return x.div_(127.5).sub_(1.0)
 
+    def gather_ctx_pixels(idx):
+        """(n, CTX, 3, H, W) in [-1,1]: the REAL context frames t-CTX .. t-1."""
+        out = np.empty((len(idx), CTX, args.image_size, args.image_size, 3), np.uint8)
+        for j, p in enumerate(idx):
+            c, t = int(ci[p]), int(fi[p])
+            out[j] = np.asarray(segs[c][t - CTX:t])
+        x = torch.from_numpy(out).permute(0, 1, 4, 2, 3).float()
+        return x.div_(127.5).sub_(1.0)
+
     # particles that can support a full L-step sequence, as a SUBSET not a mask:
     # masking inside a batch would waste the slots
     L = args.seq_len
@@ -199,8 +224,18 @@ def main():
                                  image_size=args.image_size).to(dev)
     print(f"generator params: {sum(p.numel() for p in model.parameters()):,}",
           flush=True)
+    enc_pix = None
+    params = list(model.parameters())
+    if args.pixel_context:
+        enc_pix = PixelContextEncoder(ctx_dim=DIM, ch=args.pix_ch,
+                                      image_size=args.image_size).to(dev)
+        params += list(enc_pix.parameters())
+        print(f"pixel context encoder: "
+              f"{sum(p.numel() for p in enc_pix.parameters()):,} params; the "
+              f"frozen AE is now used ONLY by the assignment, and not at all in "
+              f"the rollout loop", flush=True)
     perceptual = lpips.LPIPS(net="vgg").to(dev).eval()
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    opt = torch.optim.Adam(params, lr=args.lr)
     spe = max(1, N // args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * spe)
     amp = ((lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if args.amp
@@ -238,6 +273,8 @@ def main():
     rng = np.random.default_rng(args.seed)
     for ep in range(args.epochs):
         model.train()
+        if enc_pix is not None:
+            enc_pix.train()
         seq_on = ep >= args.seq_warmup
         perm = rng.permutation(N)
         tot_m = tot_l = n_b = 0.0
@@ -254,7 +291,12 @@ def main():
                 bt = torch.from_numpy(b).to(dev)
                 x = gather_targets(b, 1)[:, 0].to(dev, non_blocking=True)
                 a0 = torch.from_numpy(gather_actions(b, 1)[:, 0]).to(dev)
-                inp = torch.cat([z[bt], cond[bt], a0], 1)
+                if enc_pix is not None:
+                    px = gather_ctx_pixels(b).to(dev, non_blocking=True)
+                    cvec = enc_pix(px).reshape(len(b), -1)
+                else:
+                    cvec = cond[bt]
+                inp = torch.cat([z[bt], cvec, a0], 1)
                 opt.zero_grad(set_to_none=True)
                 with amp():
                     pred = model(inp)
@@ -271,12 +313,25 @@ def main():
             bt = torch.from_numpy(bs).to(dev)
             acts = torch.from_numpy(gather_actions(bs, L)).to(dev)      # (n,L,12)
             tgts = gather_targets(bs, L).to(dev, non_blocking=True)     # (n,L,3,H,W)
-            h = cond[bt].view(len(bs), CTX, DIM) / recw
+            if enc_pix is not None:
+                # pixel context: keep a WINDOW OF FRAMES and slide generated
+                # frames into it. The AE never appears -- which is the point,
+                # since with AE context every refeed step passed through an
+                # encoder never trained on generated images.
+                ctx_px = gather_ctx_pixels(bs).to(dev, non_blocking=True)
+                h = None
+            else:
+                ctx_px = None
+                h = cond[bt].view(len(bs), CTX, DIM) / recw
             opt.zero_grad(set_to_none=True)
             seq_loss = 0.0
             for s in range(L):
                 zz = torch.randn(len(bs), dim_z, device=dev)
-                inp = torch.cat([zz, (h * recw).reshape(len(bs), -1), acts[:, s]], 1)
+                if enc_pix is not None:
+                    cvec = enc_pix(ctx_px).reshape(len(bs), -1)
+                else:
+                    cvec = (h * recw).reshape(len(bs), -1)
+                inp = torch.cat([zz, cvec, acts[:, s]], 1)
                 with amp():
                     pred = model(inp)
                     m = F.mse_loss(pred, tgts[:, s])
@@ -284,7 +339,14 @@ def main():
                     seq_loss = seq_loss + m + args.lpips_weight * l
                 step_acc[s] += float(m); step_n[s] += 1
                 tot_sm += float(m)
-                if s + 1 < L:
+                if s + 1 < L and enc_pix is not None:
+                    nxt = pred.clamp(-1, 1).float().unsqueeze(1)
+                    if args.bptt:
+                        ctx_px = torch.cat([ctx_px[:, 1:], nxt], 1)
+                    else:
+                        ctx_px = torch.cat([ctx_px[:, 1:].detach(),
+                                            nxt.detach()], 1)
+                elif s + 1 < L:
                     # .float() is not optional: under autocast `pred` is
                     # bfloat16 and the AE's conv weights are fp32, and this call
                     # sits OUTSIDE the autocast block, so it would raise
@@ -324,6 +386,9 @@ def main():
                     "action_onehot": False, "gan_weight": 0.0,
                     "act_norm": act_norm, "act_names": A.get("act_names"),
                     "action_lag": lag, "seq_len": L, "seq_prob": args.seq_prob,
+                    "pixel_context": args.pixel_context, "pix_ch": args.pix_ch,
+                    "enc_pix_state_dict": (enc_pix.state_dict()
+                                           if enc_pix is not None else None),
                     "opt_state_dict": opt.state_dict(),
                     "mse": mse_e, "lpips": lp_e,
                     "assignment": str(args.assignment)},
