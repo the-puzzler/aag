@@ -130,6 +130,21 @@ def main():
     ap.add_argument("--lpips-weight", type=float, default=0.5)
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--eval-every", type=int, default=1)
+    ap.add_argument("--resume", type=Path, default=None,
+                    help="Load a converged plain generator and fine-tune it. "
+                         "THIS IS THE INTENDED USE: the pipeline order is "
+                         "assignment -> plain generator -> rollout finetune, "
+                         "because rollout supervision applied to a WEAK model is "
+                         "a different intervention than applied to a strong one "
+                         "-- rolling a weak model on its own output produces "
+                         "contexts a good model would never generate, so it is "
+                         "asked to hit the true frame from garbage and may learn "
+                         "to discount the context instead. Running this trainer "
+                         "from scratch (no --resume) confounds the two phases and "
+                         "you cannot say what rollout training bought.")
+    ap.add_argument("--start-epoch", type=int, default=0,
+                    help="where the resumed run picks up; the cosine is "
+                         "fast-forwarded here so --epochs is the NEW horizon")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
@@ -288,6 +303,42 @@ def main():
     opt = torch.optim.Adam([{"params": params, "lr": args.lr}] + enc_groups)
     spe = max(1, N // args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * spe)
+    if args.resume is not None:
+        rk = torch.load(args.resume, map_location=dev, weights_only=False)
+        model.load_state_dict(rk["model_state_dict"])
+        print(f"resumed generator from {args.resume} (epoch {rk.get('epoch')})",
+              flush=True)
+        if rk.get("enc_pix_state_dict") is not None and enc_pix is not None:
+            enc_pix.load_state_dict(rk["enc_pix_state_dict"])
+            print("  context encoder restored from the checkpoint too", flush=True)
+        if rk.get("opt_state_dict"):
+            try:
+                opt.load_state_dict(rk["opt_state_dict"])
+                print("  optimiser state restored", flush=True)
+            except ValueError:
+                # a resume that ADDS a context encoder has more param groups
+                # than the checkpoint; the weights matter more than the moments
+                print("  optimiser state NOT restored: this run has more "
+                      "parameter groups than the checkpoint (a context encoder "
+                      "was added). Weights are loaded; Adam moments restart.",
+                      flush=True)
+        # load_state_dict overwrites param_groups, and a cosine that ran its FULL
+        # horizon ends at exactly 0.0. CosineAnnealingLR.step() is recursive in
+        # group["lr"], so fast-forwarding from 0 stays at 0 and the whole finetune
+        # is a silent no-op that still prints plausible losses. Restore the base
+        # LRs first. (This exact trap cost a run earlier in this project.)
+        for g, b in zip(opt.param_groups, sched.base_lrs):
+            g["lr"] = b
+        for _ in range(args.start_epoch * spe):
+            sched.step()
+        lr_now = opt.param_groups[0]["lr"]
+        print(f"  resumed at epoch {args.start_epoch}, lr now {lr_now:.2e} on a "
+              f"{args.epochs}-epoch cosine", flush=True)
+        if lr_now < 1e-9:
+            raise SystemExit(
+                f"resumed LR is {lr_now:.2e}, which would train nothing. "
+                f"--start-epoch {args.start_epoch} is at or past the end of the "
+                f"--epochs {args.epochs} cosine; raise --epochs.")
     amp = ((lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if args.amp
            else (lambda: torch.enable_grad()))
 
@@ -321,7 +372,7 @@ def main():
 
     curve = {"epoch": [], "mse": [], "lpips": [], "seq_mse": [], "per_step": []}
     rng = np.random.default_rng(args.seed)
-    for ep in range(args.epochs):
+    for ep in range(args.start_epoch, args.epochs):
         model.train()
         if enc_pix is not None:
             enc_pix.train()
