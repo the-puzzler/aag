@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import math
+import time
 from pathlib import Path
 
 import lpips
@@ -138,6 +139,8 @@ def main():
                     help="torch.compile the AE. Needs a fixed batch shape, so the "
                          "loader must drop_last, else every partial batch triggers "
                          "a recompile")
+    ap.add_argument("--log-every", type=int, default=500,
+                    help="print intra-epoch progress every N steps. Without it a\nrun gives no signal at all until the first epoch ends, which on the full VPT\ncache is hours -- long enough that a misconfigured run (a forgotten --amp, a\ndiverged critic) burns a night before anything reveals it. 0 disables.")
     ap.add_argument("--loader-workers", type=int, default=4,
                     help="DataLoader workers. The default 4 starves the GPU on the "
                          "sharded VPT cache: each frame is a separate ~12KB random "
@@ -176,6 +179,10 @@ def main():
 
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # every training step sees the same shape, so let cuDNN autotune once.
+    # This matters most in eager mode -- which --gan-weight forces, since
+    # torch.compile is refused there.
+    torch.backends.cudnn.benchmark = True
     args.out.mkdir(parents=True, exist_ok=True)
 
     train_loader, _, test_loader, n_avail = get_loaders(
@@ -254,10 +261,13 @@ def main():
     curve = {"train_epoch": [], "train_mse": [], "train_lpips": [],
              "test_epoch": [], "test_mse": [], "test_lpips": [], "arch": args.arch}
     ae.train()
+    n_steps = len(train_loader)
     for ep in range(args.epochs):
         running_mse, running_lpips, running_hard, n = 0.0, 0.0, 0.0, 0
         running_g, running_d, running_w = 0.0, 0.0, 0.0
+        ep_t0, step = time.time(), 0
         for x, _ in train_loader:
+            step += 1
             x = x.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with amp_ctx():
@@ -307,6 +317,24 @@ def main():
             running_mse += mse_full.item() * x.size(0)
             running_lpips += (perc.item() if perc is not None else 0.0) * x.size(0)
             n += x.size(0)
+
+            if args.log_every and step % args.log_every == 0:
+                el = time.time() - ep_t0
+                rate = step / el
+                # the GAN terms are the point of this line, not the progress bar:
+                # d near 0 means the critic has won and the generator signal is
+                # gone, and w pinned at adaptive_weight's 1e4 cap means the
+                # gradient-norm probe blew up. Both are worth catching at minute
+                # 10 rather than hour 3.
+                g_str = ""
+                if disc is not None and (ep + 1) >= args.gan_start_epoch:
+                    g_str = (f"  g={running_g/n:.4f} d={running_d/n:.4f} "
+                             f"w={running_w/n:.3g}")
+                print(f"  ep{ep+1} step {step}/{n_steps} "
+                      f"({100.0*step/n_steps:.1f}%) {el/60:.1f}m elapsed, "
+                      f"eta {(n_steps-step)/rate/60:.0f}m, {rate:.1f} it/s  "
+                      f"mse={running_mse/n:.5f} lpips={running_lpips/n:.5f}{g_str}",
+                      flush=True)
         curve["train_epoch"].append(ep + 1)
         curve["train_mse"].append(running_mse / n)
         curve["train_lpips"].append(running_lpips / n)

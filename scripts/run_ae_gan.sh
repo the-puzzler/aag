@@ -45,6 +45,27 @@
 # better posed still, since an AE's pair is perfectly registered, and the
 # implementation exists in aag/discriminator -- worth an A/B later, but this run
 # uses the proven recipe rather than introducing a second variable.
+# --amp AND --loader-workers ARE NOT OPTIONAL HERE, and the first attempt at this
+# run proved it by omitting both. It ran 4h without finishing one epoch. The
+# original nine epochs of this same AE took 99 min each (checkpoint mtimes,
+# ae_dcae_ch192_dim256: ep1 13:15, ep2 14:54, ep3 16:33, ...) and both original
+# logs print "torch.compile enabled" and "bf16 autocast enabled". Dropping amp
+# put the run in fp32, and 2.4x+ of GPU time went to nothing recoverable -- no
+# checkpoint is written until an epoch ends, so the whole 4h was discarded.
+#
+# --compile is correctly absent: train_ae.py refuses it under --gan-weight,
+# because the alternating D/G steps and adaptive_weight's two autograd.grad
+# probes graph-break repeatedly. So this run is permanently eager, and part of
+# the gap against the original 99 min cannot be closed. cudnn.benchmark (added
+# to train_ae.py) recovers some of it by autotuning the conv algorithms once,
+# which is worth more in eager mode than under compile.
+#
+# --log-every 500 is the other half of the fix. train_ae.py previously printed
+# NOTHING between epoch lines, so "is this run healthy" was unanswerable for
+# hours -- which is exactly how a missing --amp survived a night. The line now
+# carries the GAN health terms too (g, d, and the adaptive weight w), so a
+# critic that has won (d -> 0) or a blown-up gradient probe (w at the 1e4 cap)
+# shows up in minutes rather than at the next epoch boundary.
 set -uo pipefail
 WT=/home/ubuntu/exp/newgen/.claude/worktrees/vpt-cache-hardening
 PY=/home/ubuntu/exp/newgen/.venv/bin/python
@@ -59,6 +80,7 @@ PYTHONPATH=$WT "$PY" scripts/train_ae.py \
   --resume "$CK" \
   --gan-weight 0.5 --gan-start-epoch 1 --gan-layers 2 --gan-ndf 64 \
   --gan-lr 4.5e-5 \
+  --amp --loader-workers 12 --log-every 500 \
   --epochs 6 --batch 128 --lr 1e-4 --eval-every 1 \
   --out /data/aag_results/results_vpt/ae_dcae_ch192_dim256_gan \
   > /data/vpt/ae_gan.log 2>&1
