@@ -36,9 +36,23 @@
 # 5/12/24 frames (0.793/0.862/0.907), which is the collider argument working. It
 # is still worth re-probing on the result.
 #
-# Expect ~2-3x the 3-frame epoch time: the 17.7M encoder now runs on 9 frames per
-# step instead of 3, and that is the dominant added cost, not the 6 extra
-# transformer tokens.
+# BATCH 48, NOT 128. The first attempt OOMed immediately at batch 128: a
+# sequence batch holds L=8 retained generator graphs AND the encoder activations
+# for the whole context window, so tripling the window from 3 to 9 frames
+# triples the largest term. 94.83 of 94.97 GiB in use before it died. 48 is
+# 128/2.67, matching the window increase. expandable_segments is set too, per the
+# allocator's own suggestion, since the failure was a 192 MiB allocation against
+# 135 MiB free -- i.e. fragmentation, not a genuine shortfall.
+#
+# This means batch is no longer matched to the 3-frame run, so [2]->[3] is not a
+# perfectly clean single-variable comparison. Context length is still the
+# dominant difference, and batch is the least conceptually loaded of the knobs,
+# but it should be stated rather than hidden.
+#
+# Expect ~2-3x the 3-frame epoch time per sample, and more wall-clock than that
+# because the batch is smaller: the 17.7M encoder now runs on 9 frames per step
+# instead of 3, which is the dominant added cost, not the 6 extra transformer
+# tokens.
 set -uo pipefail
 WT=/home/ubuntu/exp/newgen/.claude/worktrees/vpt-cache-hardening
 PY=/home/ubuntu/exp/newgen/.venv/bin/python
@@ -59,12 +73,13 @@ while pgrep -f "[t]rain_generator_vpt_seq\.py" > /dev/null; do sleep 60; done
 sleep 30
 
 echo "=== rollout-only @ 9 context frames $(date -u +%H:%M:%S) ==="
-PYTHONPATH=$WT "$PY" scripts/train_generator_vpt_seq.py \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  PYTHONPATH=$WT "$PY" scripts/train_generator_vpt_seq.py \
   --assignment "$ASG" --cache /opt/dlami/nvme/vpt_full \
   --pixel-context --pix-ch 96 --pix-depth 2 --ctx-frames 9 \
   --resume "$CK" --start-epoch 40 --epochs 50 \
   --seq-len 8 --seq-prob 0.5 --seq-warmup 0 \
-  --ch 192 --batch 128 --lr 3e-4 --amp \
+  --ch 192 --batch 48 --lr 3e-4 --amp \
   --out /data/aag_results/results_vpt/gen_rollonly_ctx9 > /data/vpt/gen_rollonly_ctx9.log 2>&1
 echo "=== generator exited rc=$? $(date -u +%H:%M:%S) ==="
 tail -5 /data/vpt/gen_rollonly_ctx9.log
