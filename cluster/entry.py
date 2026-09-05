@@ -18,8 +18,9 @@ lists stages; each stage is a shell command run from /app/aag:
 
 In a parallel group each rank runs the sub-stage whose `gpus` contains its
 LOCAL_RANK; for a `ddp` sub-stage the child sees RANK / WORLD_SIZE renumbered
-within its GPU set and its own MASTER_PORT, while LOCAL_RANK stays the physical
-GPU so `torch.cuda.set_device(LOCAL_RANK)` is still right. This is how one
+within its GPU set, its own MASTER_PORT, and CUDA_VISIBLE_DEVICES restricted to
+that set (LOCAL_RANK renumbered to match), so plain "cuda" in a one-GPU script
+means the group's first GPU, never physical GPU 0. This is how one
 node stays busy while a single-GPU assignment runs for hours (the user's
 rule: more transport is better, so it is never short).
 
@@ -99,7 +100,11 @@ for i, st in enumerate(cfg["stages"]):
         if len(mine) != 1:
             raise SystemExit(f"gpu{local}: parallel stage {tag} must assign each GPU to exactly one sub-stage, got {len(mine)}")
         s = mine[0]; gpus = parse_gpus(s["gpus"]); stag = f"{tag}/{s['name']}"
-        env = dict(base_env, RANK=str(gpus.index(local)), WORLD_SIZE=str(len(gpus)),
+        # The sub-group sees only its own GPUs, renumbered from 0: a single-GPU script's
+        # plain "cuda" then lands on the group's first GPU instead of physical GPU 0
+        # (which another sub-stage owns), and torch.cuda.set_device(LOCAL_RANK) stays valid.
+        env = dict(base_env, RANK=str(gpus.index(local)), LOCAL_RANK=str(gpus.index(local)),
+                   WORLD_SIZE=str(len(gpus)), CUDA_VISIBLE_DEVICES=",".join(str(g) for g in gpus),
                    MASTER_PORT=str(int(base_env.get("MASTER_PORT", 29500)) + 1 + subs.index(s)))
         if s.get("ddp", False) or gpus.index(local) == 0:
             done = state / f"{stag.replace('/', '_')}.done"

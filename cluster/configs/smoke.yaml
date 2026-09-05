@@ -1,10 +1,35 @@
-# Sanity job: GPUs visible, EFS writable, HF reachable, DDP works. ~5 min.
+# End-to-end sanity job (~15 min): GPUs/EFS/HF reachable, sharded encode + merge, a short
+# assignment, and ONE epoch of the DDP generator on 4096 CelebA-HQ particles. Catches
+# DDP/data-path bugs before the day-long aag256 job. Writes under $R/smoke only.
 name: smoke
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256/smoke
+  D: /mnt/shared/aag/data
 stages:
   - name: env
-    cmd: nvidia-smi -L && df -h /mnt/shared /dev/shm && mkdir -p /mnt/shared/aag && touch /mnt/shared/aag/.write_ok && python -c "import torch;print(torch.__version__, torch.cuda.device_count())"
-  - name: hf_reach
-    cmd: python -c "from huggingface_hub import HfApi; print(HfApi().dataset_info('korexyz/celeba-hq-256x256').id)"
-  - name: ddp
+    always: true
+    cmd: nvidia-smi -L && df -h /mnt/shared /dev/shm && nproc && free -g | head -2 && python -c "import torch;print(torch.__version__, torch.cuda.device_count(), torch.cuda.get_device_name(0))"
+  - name: download_celebahq
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/celebahq256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: encode
     ddp: true
-    cmd: python -c "import torch,torch.distributed as d,os; d.init_process_group('nccl'); t=torch.ones(1,device=int(os.environ['LOCAL_RANK'])); d.all_reduce(t); print('rank',d.get_rank(),'sum',t.item(), flush=True); d.destroy_process_group()"
+    cmd: python scripts/encode_hf256.py --dataset celebahq256 --amp --workers 12 --out $D/celebahq256/particles_dcae_f32c32.pt
+  - name: merge
+    cmd: python scripts/encode_hf256.py --dataset celebahq256 --merge --world 8 --out $D/celebahq256/particles_dcae_f32c32.pt
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset celebahq256 --n 0 --out $D/celebahq256/fid_stats_train_28000.npz
+  - name: assign_short
+    always: true
+    cmd: python scripts/run_assignment_classes.py --particles $D/celebahq256/particles_dcae_f32c32.pt --steps 200 --eval-every 100 --eval-k 2048 --out $R/assign_200.pt
+  - name: gen_one_epoch
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $R/assign_200.pt --dataset celebahq256 --n-particles 4096
+      --n-classes 0 --epochs 1 --batch 16 --warmup 50 --val-frac 0.05 --eval-every 1 --fid-n 1000
+      --fid-stats $D/celebahq256/fid_stats_train_28000.npz --log-every 5 --out $R/gen_smoke
