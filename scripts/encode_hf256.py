@@ -50,7 +50,7 @@ if a.merge:
     print(f"merged {a.world} shards -> {a.out}  h {tuple(m['h'].shape)}", flush=True)
     raise SystemExit(0)
 
-dev = f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}" if a.world > 1 else "cuda"
+dev = f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}"   # set_device needs an index, not bare "cuda"
 torch.cuda.set_device(dev)
 
 N_all = manifest(a.root, a.dataset)["offsets"][-1]

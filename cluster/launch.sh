@@ -6,7 +6,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ODY="${ODYSSEY_MAIN:-/data/tmp/odyssey-main}"          # fresh origin/main worktree: knows aps3
-REG=odydev.azurecr.io/aag
+REG="${AAG_IMAGE_REPO:-odydev.azurecr.io/aag}"   # e.g. 975894387485.dkr.ecr.ap-south-1.amazonaws.com/aag (in-region spare)
 # odytrain refuses to attribute jobs to a shared account (ubuntu/root); jobs carry odyssey.systems/user=<this>
 export ODYSSEY_USER="${ODYSSEY_USER:-matteopeluso}"
 TAG="${AAG_IMAGE_TAG:-$(git -C "$HERE" rev-parse --short HEAD)}"
