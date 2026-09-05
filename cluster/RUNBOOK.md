@@ -14,13 +14,13 @@ Results land under `/mnt/shared/aag/results_scale256/{celebahq,imagenet}/` -- sa
 ```bash
 aws sso login --sso-session odyssey                 # when kubectl says the token expired
 cluster/launch.sh build                             # docker build + push -> odydev.azurecr.io/aag:<git hash>
-cluster/launch.sh dry    cluster/configs/aag256_celebahq.yaml aag256-celebahq   # print manifest
-cluster/launch.sh submit cluster/configs/smoke.yaml  aag-smoke # 5-min sanity job first
-cluster/launch.sh submit cluster/configs/aag256_celebahq.yaml aag256-celebahq
-cluster/launch.sh submit cluster/configs/aag256_imagenet.yaml aag256-imagenet
+cluster/launch.sh dry    cluster/configs/aag256_celebahq.yaml aag1   # print manifest
+# job names are deliberately plain (user: "aag1", "aag2") so they are easy to spot in k9s
+cluster/launch.sh submit cluster/configs/aag256_celebahq.yaml aag1
+cluster/launch.sh submit cluster/configs/aag256_imagenet.yaml aag2
 kubectl -n kubeflow get pytorchjobs | grep aag
-kubectl -n kubeflow logs -f -l training.kubeflow.org/job-name=aag256-imagenet --tail=100
-cd /data/tmp/odyssey-main/tools/odytrain && uv run python delete.py --job_name=aag256-imagenet
+kubectl -n kubeflow logs -f -l training.kubeflow.org/job-name=aag2 --tail=100
+cd /data/tmp/odyssey-main/tools/odytrain && uv run python delete.py --job_name=aag2 --cluster=eks-train-prod-aps3
 ```
 Set `AAG_IMAGE_TAG=<tag>` to launch a tag other than the current git hash.
 
