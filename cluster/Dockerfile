@@ -26,3 +26,6 @@ COPY cluster ./cluster
 RUN uv pip install --python .venv/bin/python --no-deps -e . \
  && .venv/bin/python -c "import torch, lpips, diffusers, pyarrow; print(torch.__version__)"
 ENV PATH="/app/aag/.venv/bin:$PATH" PYTHONPATH=/app/aag
+
+# gcc for torch.compile (Triton/Inductor needs a C compiler); appended last so the heavy layers stay cached
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
