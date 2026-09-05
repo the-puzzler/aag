@@ -10,7 +10,7 @@ env:
   R: /mnt/shared/aag/results_scale256/celebahq_ae
   COMMON: >-
     --dataset celebahq256 --data /mnt/shared/aag/hf --image-size 256 --lpips-weight 0.5 --amp --compile
-    --batch 32 --lr 1e-3 --epochs 100 --eval-every 5 --log-every 200 --loader-workers 6
+    --batch 128 --lr 2e-3 --epochs 100 --eval-every 5 --log-every 200 --loader-workers 6
 stages:
   - name: download
     cmd: >-
