@@ -1,0 +1,23 @@
+# faces256 = CelebA-HQ train (28k) + FFHQ-256 (70k) = 98k faces. Compact-AE retrain on the combined set
+# (the CelebA-trained d128 AE reconstructs FFHQ at 0.044/0.38 vs 0.033/0.31 on CelebA: domain gap).
+# 4 single-GPU runs, 30 epochs (~105k steps at batch 128 -- 5x the 28k sweep's step count).
+name: ae_faces256
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  R: /mnt/shared/aag/results_scale256/faces256_ae
+  COMMON: >-
+    --dataset faces256 --data /mnt/shared/aag/hf --image-size 256 --lpips-weight 0.5 --amp --compile
+    --batch 128 --lr 1e-3 --epochs 30 --eval-every 3 --log-every 200 --loader-workers 6
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $R && python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16);
+      s('merkol/ffhq-256', repo_type='dataset', local_dir='$AAG_HF_ROOT/ffhq-256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+      && bash scripts/make_faces256.sh $AAG_HF_ROOT
+  - name: ae_sweep
+    parallel:
+      - {name: dcae_d64_g4_c128,  gpus: "0-1", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 64 --grid 4 --ch 128 --out $R/dcae_d64_g4_c128"}
+      - {name: dcae_d128_g4_c128, gpus: "2-3", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 128 --out $R/dcae_d128_g4_c128"}
+      - {name: dcae_d256_g4_c128, gpus: "4-5", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 256 --grid 4 --ch 128 --out $R/dcae_d256_g4_c128"}
+      - {name: dcae_d128_g4_c96,  gpus: "6-7", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 96 --out $R/dcae_d128_g4_c96"}
