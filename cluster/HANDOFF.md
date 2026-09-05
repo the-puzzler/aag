@@ -340,6 +340,26 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - Scripts in the job tmp dir: `zsource_fid_aag8.py` (decomposition), `knn_split.py`,
   `run_celebahq_ae_pipeline.sh`, `ae_sheet.py`. Configs: `aag256_celebahq_{titok,dcae_d128}_adv.yaml`.
 
+### 8g. 18:30 UTC -- the transport is the bottleneck; direction search and budget
+
+- z-source decomposition (same checkpoint, assigned z vs fresh z vs coordinate-shuffled): CelebA
+  aag8 8.7 / 36 / 36; ImageNet aag2 (ep10) 26 / 149 / 149. Latent + generator are fine on the
+  cloud; the whole gap is joint structure of z that fresh Gaussians lack.
+- Random 1-D directions miss it: worst of 64 random reads at the noise floor while an optimised
+  direction reads 1000x higher. `refine_direction` (max-sliced) and `population_direction`
+  (user's skew/kurt projection pursuit) added; `run_assignment_classes.py --refine-steps`.
+- BUT harder Gaussianisation costs the generator: aag11 (200k + 20k refined a=1) FID 46 vs aag3
+  38.4; toy bench (`scripts/toy_assignment_bench.py`) shows the generator's optimum is EARLY
+  (random 3k > 10k > 100k; refine a0.1 at 3k best), and assignment-space Gaussianity readouts
+  (kNN A->A, C2ST, learned-dir W2) do NOT predict the generator. Held-out MSE tracks it best.
+- Generators queued on real data: aag12 (refine a0.3, 10k), aag13 (random 100k ckpt), aag14
+  (refine a0.1, 3k). Best so far: aag8 TiTok + adversary FID-50k 33.7.
+- AE sweeps: CelebA d32 0.057/0.365, d16 0.075/0.396 (lossy); ImageNet own AEs (matteo-exp-3)
+  d256-1024 on 300k rows: best ~0.035/0.30 at epoch 10/20 (beats TiTok's 0.056/0.328).
+- User rules today: no FFHQ (comparison paper uses CelebA-HQ), no DINO, pairwise adversary on
+  the generator, 30-min update cadence, decisions via push with options, comparisons as one PNG
+  with column headers (`compose_columns.py`), kubectl delete authorised for their jobs.
+
 ## 9. What to do next
 
 1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
