@@ -112,6 +112,50 @@ def refine_direction(zs, a, *, steps=30, lr=0.05):
     return (u / u.norm()).detach()
 
 
+def population_direction(z, *, n_pop, probe_steps, batch, eval_subset, lr, gen):
+    """Projection-pursuit direction search (user's proposal, 2026-09-05).
+
+    A population of `n_pop` unit directions is optimised by gradient ascent on a smooth
+    non-Gaussianity surrogate -- skew^2 + excess-kurtosis^2 of the standardised projection
+    of a FRESH minibatch each probe step (the points are never parameters, nothing is
+    differentiated through the transport). The frozen candidates are then scored on a larger
+    subset with the real AAG criterion, the 1-D W2 to N(0,1), and the argmax is returned.
+    Returns (direction, verified W2).
+    """
+    N, d = z.shape
+    v = torch.nn.Parameter(_rand_unit(n_pop, d, z.device, z.dtype))
+    opt = torch.optim.Adam([v], lr=lr)
+    with torch.enable_grad():
+        for _ in range(probe_steps):
+            idx = torch.randint(N, (batch,), device=z.device, generator=gen)
+            y = z[idx].detach() @ (v / v.norm(dim=1, keepdim=True)).T            # (batch, n_pop)
+            y = (y - y.mean(0)) / (y.std(0) + 1e-6)
+            skew = (y ** 3).mean(0); kurt = (y ** 4).mean(0) - 3.0
+            loss = -(skew ** 2 + kurt ** 2).sum()
+            opt.zero_grad(); loss.backward(); opt.step()
+            with torch.no_grad():
+                v /= v.norm(dim=1, keepdim=True)
+    with torch.no_grad():
+        dirs = v / v.norm(dim=1, keepdim=True)
+        idx = torch.randperm(N, device=z.device, generator=gen)[:min(eval_subset, N)]
+        proj = z[idx] @ dirs.T
+        s, _ = torch.sort(proj, dim=0)
+        q = _gaussian_quantiles(s.shape[0], z.device, z.dtype).unsqueeze(1)
+        scores = ((s - q) ** 2).mean(0)
+        best = torch.argmax(scores)
+        return dirs[best].detach(), float(scores[best])
+
+
+def rank_transport_along(z, a, *, alpha=1.0):
+    """The ordinary AAG update along a given unit direction a: rank-match the projections to
+    Gaussian order statistics and move each point only along a."""
+    proj = z @ a
+    order = torch.argsort(proj)
+    target = torch.empty_like(proj)
+    target[order] = _gaussian_quantiles(z.shape[0], z.device, z.dtype)
+    z.add_(alpha * (target - proj).unsqueeze(1) * a.unsqueeze(0))
+
+
 def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen, return_score=True, refine_steps=0):
     """One global step: find the most non-Gaussian projection, rank-transport it.
 
