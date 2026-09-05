@@ -405,3 +405,11 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - Chains live in `/home/ubuntu/.claude/jobs/2153ceba/tmp/chain_v4.sh` (node A: aag14→aag23→aag16→aag18→aag20; node B:
   aag15→aag17→aag19→aag21) and `chain_22.sh`. AE sweep (matteo-exp-3): ImageNet own d512-g4 0.043/0.351, d1024 0.033/0.288
   (TiTok 0.056/0.328); CelebA d32 0.057, d16 0.075 (too tight).
+- **Later that night:** aag23 (x2 flips) FID-10k 37.77 / FID-50k 36.40 (best plain); aag24 = pairwise adversary on it → FID-10k
+  **33.57**; aag25 = gan-weight 1.0 variant queued (chain_v6.sh). Diagnostics (jobs/2153ceba/tmp/*.py): latent MLP + TiTok
+  decoder — assigned z hit the decoder ceiling (7.6 CelebA / 8.1 ImageNet) but fresh z give 73 (CelebA) / 121–149 (ImageNet):
+  the gap is joint z-structure, not generator blur. Assigned-vs-fresh MLP critic: best-FID CelebA assignments are 65–70%
+  distinguishable, over-transported ones ≤ chance but worse FID (coverage vs smoothness at 28k). ImageNet critic 79/83/70%
+  (300k/refined/1M) with fresh FID 134/142/121 — more transport helps there; z→class MLP probe 13–15% (chance 0.1%) and
+  class-focused transport cannot remove it. Running locally: `assign_cls_3m.pt` (1M→3M random). `imagenet_2m_pipeline.sh`
+  swaps the 2M slim assignment onto EFS and raises `go22`; `chain_22_v2.sh` submits aag22 after aag2 + go22 (90-min deadline).
