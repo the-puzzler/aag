@@ -252,6 +252,7 @@ def _hf256_loaders(dataset, root, batch, n_particles, workers, n_train):
     particle set, the validation split as the held-out test set. CelebA-HQ is 5.5 GB uint8;
     ImageNet would be 252 GB, so pass n_train for that.
     """
+    from torch.utils.data import DataLoader
     from .hf256 import load_uint8, manifest
     root = root if root and root != "/data/hf_cache" else "/data/aag_data/hf"
     n = manifest(root, dataset)["offsets"][-1]

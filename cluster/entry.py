@@ -67,14 +67,14 @@ def run(cmd, tag, env):
     r = subprocess.run(cmd, shell=True, env=env, cwd="/app/aag")
     if r.returncode:
         print(f"[entry gpu{local}] stage {tag} FAILED rc={r.returncode}", flush=True)
-        (shm / f"{tag}.failed").touch()
+        (shm / f"{tag.replace('/', '_')}.failed").touch()   # sub-stage tags carry a slash
         sys.exit(r.returncode)
     log(f"stage {tag} done in {(time.time() - t) / 60:.1f} min", rank0_only=False)
 
 
 def wait_for(marker, tag):
     while not (shm / marker).exists():
-        if (shm / f"{tag}.failed").exists() or any(shm.glob("*.failed")):
+        if (shm / f"{tag.replace('/', '_')}.failed").exists() or any(shm.glob("*.failed")):
             sys.exit(1)
         time.sleep(5)
 
