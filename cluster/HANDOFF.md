@@ -302,6 +302,25 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - Target: ROMS-IMLE FID-50k 6.70 (CelebA-HQ @138M) / 2.56 (ImageNet @310M). Best so far:
   CelebA-HQ FID-50k 37.1 (aag3). `scripts/eval_fid256.py --n 50000` for comparable numbers.
 
+### 8e. 12:00 UTC
+
+- `aag2` (ImageNet, 285M, 300k d=512 assignment, image d1ceef4): banner correct (1,281,167
+  particles, 1000 classes, 160,146 images/rank = 31.5 GB uint8, identity check passed, 12,811
+  held-out pairs), **821 img/s -> 26 min/epoch -> 40 epochs ~17 h**, eval every 2 epochs.
+  User: future ImageNet generators should be SMALLER (~140M or less); capacity is not the lever
+  (aag5 133.6M plateaued at FID-10k 41.2-41.7 vs aag3 38M at 38.4 on the same assignment).
+- `matteo-exp-2` (AE sweep, image 58f8c9e = gcc+libc6-dev+python3-dev for torch.compile):
+  8 variants running, ~2-3 min/epoch, epoch-5 val MSE 0.033-0.053 / LPIPS 0.37-0.42. Log lines
+  are tagged only by arch; attribute variants via `celebahq_ae/<variant>/ae_train_curve_*.json`.
+  Three failed submissions before this one: missing DataLoader import, entry.py marker path with
+  '/', no C compiler in the image. **Test the exact cluster command path locally (incl. --compile)
+  before submitting.** User authorised `kubectl delete pytorchjob` for their aag*/matteo-exp-* jobs.
+- Next: when the sweep's epoch-20+ numbers and sheets are in, the user picks a latent; then
+  encode CelebA-HQ with it (`encode_hf256.py --encoder <ae_ckpt>.pt`), assign (~200k steps,
+  watch A->A and held-out MSE, not more), generator at width 1.0. Selection metric for the
+  assignment budget on data-poor sets: held-out pair MSE, per the user's "more transport only
+  with enough data" rule.
+
 ## 9. What to do next
 
 1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
