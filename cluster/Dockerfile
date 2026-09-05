@@ -28,4 +28,4 @@ RUN uv pip install --python .venv/bin/python --no-deps -e . \
 ENV PATH="/app/aag/.venv/bin:$PATH" PYTHONPATH=/app/aag
 
 # gcc for torch.compile (Triton/Inductor needs a C compiler); appended last so the heavy layers stay cached
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev python3-dev && rm -rf /var/lib/apt/lists/*
