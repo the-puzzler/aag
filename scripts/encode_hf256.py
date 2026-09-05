@@ -31,6 +31,7 @@ ap.add_argument("--batch", type=int, default=64)
 ap.add_argument("--chunk", type=int, default=16384, help="parquet rows decoded per round")
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--amp", action="store_true", help="bf16 autocast for the encoder")
+ap.add_argument("--flip", action="store_true", help="encode horizontally flipped images (pair-doubling augmentation)")
 ap.add_argument("--rank", type=int, default=int(os.environ.get("RANK", 0)),
                 help="shard index: encode only rows [rank*N/world, (rank+1)*N/world) and write <out>.shard<rank>")
 ap.add_argument("--world", type=int, default=int(os.environ.get("WORLD_SIZE", 1)))
@@ -101,6 +102,7 @@ for lo in range(0, N, a.chunk):
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
         for i in range(0, hi - lo, a.batch):
             xb = to_float(x[i:i + a.batch]).to(dev, non_blocking=True)
+            if a.flip: xb = xb.flip(-1)                  # (B,3,H,W): flip W
             h[lo + i:lo + i + xb.shape[0]] = encode(xb).float().half().cpu()
     done = hi; rate = done / (time.time() - t0)
     print(f"  {done:>9,}/{N:,}  {rate:6.0f} img/s  eta {(N - done) / rate / 60:5.1f} min", flush=True)

@@ -42,6 +42,9 @@ ap.add_argument("--n-classes", type=int, default=-1,
                 help="-1 = infer (labels.max()+1) when the assignment was class-conditional (has levels), "
                      "else 0; 0 forces unconditional")
 ap.add_argument("--width", type=float, default=1.0)
+ap.add_argument("--aug-hflip", action="store_true",
+                help="assignment rows [n_img, 2 n_img) are the horizontally flipped copies of rows [0, n_img) "
+                     "(particles from encode_hf256.py --flip, merged by merge_particles.py)")
 ap.add_argument("--n-res", type=int, default=2)
 ap.add_argument("--cond-dim", type=int, default=512)
 ap.add_argument("--epochs", type=int, default=40)
@@ -118,7 +121,19 @@ log(f"assignment {a.assignment}: N={N:,}/{N_avail:,} dim_z={dim_z} grid={grid} l
 
 workers = a.decode_workers or max(1, (os.cpu_count() or 8) // world)
 t = time.time()
-x_u8, y_dec = load_uint8(a.root, a.dataset, lo, hi, workers=workers, chunk=2048)
+if a.aug_hflip:
+    n_img = manifest(a.root, a.dataset)["offsets"][-1]
+    if N_avail != 2 * n_img:
+        raise SystemExit(f"--aug-hflip: assignment has {N_avail:,} rows, expected 2 x {n_img:,}")
+    parts, labs = [], []
+    if lo < n_img:                                       # original rows in this shard
+        xa, ya = load_uint8(a.root, a.dataset, lo, min(hi, n_img), workers=workers, chunk=2048); parts.append(xa); labs.append(ya)
+    if hi > n_img:                                       # flipped rows: image (r - n_img), W-flipped
+        xb, yb = load_uint8(a.root, a.dataset, max(lo, n_img) - n_img, hi - n_img, workers=workers, chunk=2048)
+        parts.append(xb.flip(2)); labs.append(yb)         # (n,H,W,3): dim 2 is W
+    x_u8, y_dec = torch.cat(parts), torch.cat(labs)
+else:
+    x_u8, y_dec = load_uint8(a.root, a.dataset, lo, hi, workers=workers, chunk=2048)
 x_u8 = x_u8.to(dev)                                      # (n, H, W, 3) uint8, GPU-resident
 y_dec = y_dec.to(dev)
 if not torch.equal(y_dec, y):

@@ -14,7 +14,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--snaps", type=Path, required=True, help="…_snaps directory")
 ap.add_argument("--D", type=int, default=128); ap.add_argument("--k", type=int, default=16); ap.add_argument("--N", type=int, default=28000)
 ap.add_argument("--noise", type=float, default=0.02); ap.add_argument("--seed", type=int, default=0)
-ap.add_argument("--methods", default="random")
+ap.add_argument("--methods", default="random"); ap.add_argument("--steps-only", default="", help="comma list of snapshot steps to score")
 ap.add_argument("--recipes", default="w1024d3s6000,w1024d3s1500,w512d2s6000,w512d2s1500,w1024d3s6000wd0.3,w256d2s1500")
 ap.add_argument("--out", type=Path, required=True)
 a = ap.parse_args(); dev = "cuda"
@@ -37,7 +37,7 @@ def frechet(A, B):
     ev = torch.linalg.eigvals(cA @ cB).real.clamp_min(0)
     return float(((muA - muB) ** 2).sum() + torch.trace(cA) + torch.trace(cB) - 2 * ev.sqrt().sum())
 
-def train(z, width, depth, steps, wd, seed=0):
+def train(z, width, depth, steps, wd, jit=0.0, seed=0):
     torch.manual_seed(seed); d = z.shape[1]; D = x.shape[1]
     layers = [nn.Linear(d, width), nn.SiLU()]
     for _ in range(depth - 1): layers += [nn.Linear(width, width), nn.SiLU()]
@@ -45,18 +45,20 @@ def train(z, width, depth, steps, wd, seed=0):
     opt = torch.optim.AdamW(G.parameters(), lr=1e-3 if width >= 1024 else 2e-3, weight_decay=wd); sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
     for _ in range(steps):
         b = tr_idx[torch.randint(len(tr_idx), (512,), device=dev)]
-        loss = F.mse_loss(G(z[b]), x[b]); opt.zero_grad(); loss.backward(); opt.step(); sched.step()
+        zb = z[b] + jit * torch.randn_like(z[b]) if jit else z[b]        # input jitter: smooth the map between pairs
+        loss = F.mse_loss(G(zb), x[b]); opt.zero_grad(); loss.backward(); opt.step(); sched.step()
     G.eval()
     with torch.no_grad():
         return {"FD_fresh": frechet(G(torch.randn(5000, d, device=dev)), x_test), "heldout_mse": F.mse_loss(G(z[ho_idx]), x[ho_idx]).item(),
                 "train_mse": F.mse_loss(G(z[tr_idx[:5000]]), x[tr_idx[:5000]]).item()}
 
 def parse(r):
-    m = re.match(r"w(\d+)d(\d+)s(\d+)(?:wd([0-9.]+))?$", r); return int(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4) or 0.01)
+    m = re.match(r"w(\d+)d(\d+)s(\d+)(?:wd([0-9.]+))?(?:j([0-9.]+))?$", r); return int(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4) or 0.01), float(m.group(5) or 0)
 recipes = a.recipes.split(",")
 res = {"config": vars(a), "results": {}}
 for method in a.methods.split(","):
     files = sorted(a.snaps.glob(f"{method}_*.pt"), key=lambda p: int(p.stem.split("_")[-1]))
+    if a.steps_only: files = [p for p in files if p.stem.split("_")[-1] in a.steps_only.split(",")]
     print(f"\n== {method}   FD_fresh per recipe (held-out mse in brackets)\n{'step':>7s} | " + " ".join(f"{r:>22s}" for r in recipes), flush=True)
     for p in files:
         step = int(p.stem.split("_")[-1]); z = torch.load(p).float().to(dev); row = {}
