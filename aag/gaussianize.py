@@ -92,7 +92,27 @@ def _rand_unit(k: int, d: int, device, dtype) -> torch.Tensor:
 # --------------------------------------------------------------------------- #
 # 1.2  greedy global rank transport
 # --------------------------------------------------------------------------- #
-def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen, return_score=True):
+def refine_direction(zs, a, *, steps=30, lr=0.05):
+    """Gradient ascent on the projected W2-to-N(0,1) of the subset, starting from `a`.
+
+    Random directions miss structure in high d: on the TiTok-512 CelebA-HQ cloud the worst of
+    64 random directions read 0.00025 (Gaussian floor 0.00028) while an optimised direction
+    found 0.255 -- a 1000x larger residual the transport never touched. A few Adam steps on
+    the unit vector find it (max-sliced Wasserstein). zs: (m, d) detached subset.
+    """
+    u = torch.nn.Parameter(a.detach().clone())
+    opt = torch.optim.Adam([u], lr=lr)
+    q = _gaussian_quantiles(zs.shape[0], zs.device, zs.dtype)
+    with torch.enable_grad():
+        for _ in range(steps):
+            v = u / u.norm()
+            s, _ = torch.sort(zs @ v)
+            loss = -((s - q) ** 2).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+    return (u / u.norm()).detach()
+
+
+def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen, return_score=True, refine_steps=0):
     """One global step: find the most non-Gaussian projection, rank-transport it.
 
     Direction search uses only `search_subset` points (report 1.2: "the
@@ -116,6 +136,8 @@ def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen, return_s
     scores = ((s - q) ** 2).mean(0)
     best = torch.argmax(scores)
     a = dirs[best]                                        # a*
+    if refine_steps:
+        a = refine_direction(zs.detach(), a, steps=refine_steps)
 
     # full-dataset rank transport along a*
     proj_full = z @ a                                     # (N,)
