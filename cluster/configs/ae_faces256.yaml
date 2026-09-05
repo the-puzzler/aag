@@ -1,6 +1,6 @@
 # faces256 = CelebA-HQ train (28k) + FFHQ-256 (70k) = 98k faces. Compact-AE retrain on the combined set
 # (the CelebA-trained d128 AE reconstructs FFHQ at 0.044/0.38 vs 0.033/0.31 on CelebA: domain gap).
-# 4 single-GPU runs, 30 epochs (~105k steps at batch 128 -- 5x the 28k sweep's step count).
+# 8 single-GPU runs (valid DC-AE bottlenecks: ch/cell must divide the skip), 30 epochs (~105k steps at batch 128 -- 5x the 28k sweep's step count).
 name: ae_faces256
 env:
   AAG_HF_ROOT: /mnt/shared/aag/hf
@@ -17,7 +17,11 @@ stages:
       && bash scripts/make_faces256.sh $AAG_HF_ROOT
   - name: ae_sweep
     parallel:
-      - {name: dcae_d64_g4_c128,  gpus: "0-1", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 64 --grid 4 --ch 128 --out $R/dcae_d64_g4_c128"}
-      - {name: dcae_d128_g4_c128, gpus: "2-3", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 128 --out $R/dcae_d128_g4_c128"}
-      - {name: dcae_d256_g4_c128, gpus: "4-5", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 256 --grid 4 --ch 128 --out $R/dcae_d256_g4_c128"}
-      - {name: dcae_d128_g4_c96,  gpus: "6-7", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 96 --out $R/dcae_d128_g4_c96"}
+      - {name: dcae_d32_g4_c128, gpus: "0", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 32 --grid 4 --ch 128 --out $R/dcae_d32_g4_c128"}
+      - {name: dcae_d64_g4_c128, gpus: "1", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 64 --grid 4 --ch 128 --out $R/dcae_d64_g4_c128"}
+      - {name: dcae_d128_g4_c128, gpus: "2", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 128 --out $R/dcae_d128_g4_c128"}
+      - {name: dcae_d256_g4_c128, gpus: "3", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 256 --grid 4 --ch 128 --out $R/dcae_d256_g4_c128"}
+      - {name: dcae_d128_g4_c96, gpus: "4", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 96 --out $R/dcae_d128_g4_c96"}
+      - {name: dcae_d64_g8_c128, gpus: "5", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 64 --grid 8 --ch 128 --out $R/dcae_d64_g8_c128"}
+      - {name: dcae_d128_g8_c128, gpus: "6", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 8 --ch 128 --out $R/dcae_d128_g8_c128"}
+      - {name: dcae_d256_g8_c128, gpus: "7", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 256 --grid 8 --ch 128 --out $R/dcae_d256_g8_c128"}
