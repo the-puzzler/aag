@@ -266,6 +266,23 @@ generator on the 200k d=512 assignment (`aag256_celebahq_titok.yaml`, image `ba8
 Generator256 grid=0 -> learned Linear stem). ImageNet (N/d 626, TwoNN 88) stays on DC-AE
 for now; its 300k hierarchy assignment is running locally.
 
+### 8c. Target and current runs (09:40 UTC)
+
+**Target (user):** beat ROMS-IMLE (arXiv 2607.19332): FID-50k 2.56 on ImageNet-256 @310M
+(raw 4.16; 2.56 needs their round-trip rejection), 6.70 on CelebA-HQ-256 @138M, NFE 1. Use
+`scripts/eval_fid256.py --n 50000` for comparable numbers (validated vs in-loop FID).
+User: no DINO loss; a pairwise adversary (real||gen channel concat) is the later addition;
+rising held-out MSE while FID falls is NOT overfitting (their prior observation).
+
+`aag3` (TiTok d=512, 200k assignment, 38.3M): 400 epochs done, best FID-10k 38.35 @ep230,
+FID-50k 37.2 @ep180, plateau from ep130. `aag4` (submitted 09:38): 1M assignment (A->A 0.545)
++ width 1.9/n_res 2 = 133.6M, image `d1ceef4`, config `aag256_celebahq_titok_1m.yaml`.
+ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A 0.746@50k,
+0.669@100k; all hierarchy ratios ~1.0 by 100k, joint 2.2 @150k), auto-continues to 1M
+(`assign_cls_1m*.pt`); the 300k goes to `aag2` (`aag256_imagenet_titok.yaml`, width 2.2/n_res 3
+= 285M, 40 epochs) via the helper pod. ACR docker login expires after a few hours:
+`az acr login -n odydev` then `docker push` if launch.sh build reports "authentication required".
+
 ## 9. What to do next
 
 1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
