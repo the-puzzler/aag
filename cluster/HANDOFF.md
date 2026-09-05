@@ -247,6 +247,25 @@ busybox pod `aagcp` (kubeflow ns, PVC `shared-drive` at `/mnt/shared`) makes `ku
 work with no bucket (~8 MB/s: 600 MB in 73 s, so ~30 min for ImageNet). If a bucket is ever
 wanted, the convention is `s3://ody-model-hub-aps3/training/<owner-or-project>/...`.
 
+### 8b. The CelebA-HQ finding and the TiTok pivot (08:00 UTC)
+
+`aag1` (DC-AE d=2048, 200k assignment) trained fine but plateaued: FID-10k 96-99 from
+epoch 80 on, held-out pair MSE best 0.0213 at ~epoch 100 then drifting up (overfitting the
+27k pairs). The user noticed held-out pairs look far better than fresh samples. Measured:
+same epoch-40 EMA gives FID 18 on ASSIGNED z, 146 on fresh N(0,I), 144 on assigned z with
+coordinates shuffled independently -- the generator is fine, the JOINT of z is not Gaussian
+although every 1-D projection is. Readout: the SPLIT kNN two-sample test (`knn_split.py` in
+the job tmp dir): A->A = fraction of an assigned point's 10 NN that are assigned (0.5 =
+Gaussian). d=2048: 1.000 -> 0.968 after 200k steps. Cause per METHOD.md s5: independent-N/d
+= 28k/2048 = 14, below the UCF-101 failure case (37). User: matching to a Gaussian sample
+(Sinkhorn/LAP) does NOT work -- "it needs to cover the whole gaussian". User's remedy: the
+512-d TiTok-LL-32 VAE latent (only pretrained continuous tokenizer that is more compressed;
+recon MSE 0.026 vs 0.010). Same recipe at d=512: A->A 0.937 (20k) -> 0.673 (200k) -> 0.593
+(500k), continuing to 1M (`celebahq_titok/assign/assign_uncond_1m*.pt`). `aag3` = the
+generator on the 200k d=512 assignment (`aag256_celebahq_titok.yaml`, image `ba83580`,
+Generator256 grid=0 -> learned Linear stem). ImageNet (N/d 626, TwoNN 88) stays on DC-AE
+for now; its 300k hierarchy assignment is running locally.
+
 ## 9. What to do next
 
 1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
