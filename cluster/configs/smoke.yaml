@@ -1,0 +1,10 @@
+# Sanity job: GPUs visible, EFS writable, HF reachable, DDP works. ~5 min.
+name: smoke
+stages:
+  - name: env
+    cmd: nvidia-smi -L && df -h /mnt/shared /dev/shm && mkdir -p /mnt/shared/aag && touch /mnt/shared/aag/.write_ok && python -c "import torch;print(torch.__version__, torch.cuda.device_count())"
+  - name: hf_reach
+    cmd: python -c "from huggingface_hub import HfApi; print(HfApi().dataset_info('korexyz/celeba-hq-256x256').id)"
+  - name: ddp
+    ddp: true
+    cmd: python -c "import torch,torch.distributed as d,os; d.init_process_group('nccl'); t=torch.ones(1,device=int(os.environ['LOCAL_RANK'])); d.all_reduce(t); print('rank',d.get_rank(),'sum',t.item(), flush=True); d.destroy_process_group()"

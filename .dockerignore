@@ -1,0 +1,11 @@
+.git
+.venv
+weights
+assets
+plots
+docs
+research
+results_*
+__pycache__
+*.pt
+*.log
