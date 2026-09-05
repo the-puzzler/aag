@@ -63,6 +63,10 @@ ap.add_argument("--decode-workers", type=int, default=0, help="0 = cpu_count // 
 ap.add_argument("--resume", default=None, help="checkpoint path, or 'auto' = latest gen_ep*.pt under --out")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", type=Path, required=True)
+ap.add_argument("--arch", choices=["grid", "residual"], default="grid",
+                help="grid = Generator256 (reshape/stem onto a spatial grid, GroupNorm, DC-AE shortcuts); "
+                     "residual = the published 64x64 recipe scaled to 256: flat z -> Linear -> 4x4 -> BatchNorm residual up-blocks (aag.ae.ResidualDecoder)")
+ap.add_argument("--ch", type=int, default=128, help="--arch residual: base channels of ResidualDecoder")
 # --- pairwise adversary (user, 2026-09-05): a finetune on the converged plain generator.
 # The critic sees real and generated images for the SAME z stacked on the channel axis in a
 # random order and says which side is real (aag.discriminator.paired_*). No AE adversary: a
@@ -134,11 +138,22 @@ n_train_total = int((~val_mask_all).sum())
 log(f"held-out pairs: {int(val_mask_all.sum()):,} total ({a.val_frac:.1%}), {va_idx.numel():,} on rank 0")
 
 # ---------------------------------------------------------------- model
-model = Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
-                     cond_dim=a.cond_dim, width=a.width, n_res=a.n_res).to(dev)
+if a.arch == "residual":
+    from aag.ae import ResidualDecoder
+    assert n_classes == 0, "--arch residual is unconditional"
+    class FlatGen(torch.nn.Module):          # same forward(z, y) interface as Generator256
+        def __init__(self):
+            super().__init__(); self.dec = ResidualDecoder(dim_z, ch=a.ch, image_size=DATASETS[a.dataset]["image_size"])
+            self.out = self.dec.net[-1]      # last conv, for the adaptive adversarial weight
+        def forward(self, z, y=None):
+            return self.dec(z)
+    make = lambda: FlatGen().to(dev)
+else:
+    make = lambda: Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
+                                cond_dim=a.cond_dim, width=a.width, n_res=a.n_res).to(dev)
+model = make()
 n_params = sum(p.numel() for p in model.parameters())
-ema = Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
-                   cond_dim=a.cond_dim, width=a.width, n_res=a.n_res).to(dev).eval()
+ema = make().eval()
 ema.load_state_dict(model.state_dict())
 for p in ema.parameters():
     p.requires_grad_(False)
@@ -213,7 +228,7 @@ if adv:
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
 fwd = torch.compile(model) if a.compile else model
 
-log(f"generator: {n_params / 1e6:.1f}M params  width={a.width} n_res={a.n_res}  batch {a.batch}x{world}={a.batch * world}  "
+log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''} width={a.width} n_res={a.n_res}  batch {a.batch}x{world}={a.batch * world}  "
     f"{steps_per_epoch:,} steps/epoch x {a.epochs} epochs  lr {a.lr} warmup {a.warmup}  ema {a.ema}")
 log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  lpips_weight {a.lpips_weight}  "
     f"fid: {'every eval, n=' + str(a.fid_n) + ' vs ' + a.fid_stats if a.fid_stats else 'off'}")
@@ -344,7 +359,7 @@ for epoch in range(start_epoch, a.epochs):
                         **({"disc": (disc.module if ddp else disc).state_dict(), "opt_d": opt_d.state_dict()} if adv else {}),
                         "epoch": epoch + 1, "gstep": gstep, "curve": curve, "args": vars(a), "dim_z": dim_z,
                         "grid": grid, "n_classes": n_classes, "width": a.width, "n_res": a.n_res,
-                        "cond_dim": a.cond_dim, "assignment": a.assignment}, str(ck) + ".tmp")
+                        "cond_dim": a.cond_dim, "assignment": a.assignment, "arch": a.arch, "ch": a.ch}, str(ck) + ".tmp")
             Path(str(ck) + ".tmp").replace(ck)
             (a.out / "curve.json").write_text(json.dumps(curve, indent=1))
     else:

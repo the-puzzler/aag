@@ -31,9 +31,17 @@ dev = "cuda"
 ck = torch.load(a.checkpoint, map_location="cpu", weights_only=False)
 n_classes = int(ck.get("n_classes", 0))
 sd = ck[a.weights]
-dim_z = sd["lay.weight"].shape[1] if "lay.weight" in sd else sd["stem.weight"].shape[1] * ck["grid"] ** 2
-net = Generator256(dim_z, grid=ck["grid"], image_size=256, n_classes=n_classes, cond_dim=ck["cond_dim"],
-                   width=ck["width"], n_res=ck["n_res"]).to(dev).eval()
+dim_z = sd["lay.weight"].shape[1] if "lay.weight" in sd else (sd["dec.fc.weight"].shape[1] if "dec.fc.weight" in sd else sd["stem.weight"].shape[1] * ck["grid"] ** 2)
+if ck.get("arch", "grid") == "residual":
+    from aag.ae import ResidualDecoder
+    class FlatGen(torch.nn.Module):
+        def __init__(self):
+            super().__init__(); self.dec = ResidualDecoder(dim_z, ch=ck["ch"], image_size=256); self.out = self.dec.net[-1]
+        def forward(self, z, y=None): return self.dec(z)
+    dim_z = sd["dec.fc.weight"].shape[1]; net = FlatGen().to(dev).eval()
+else:
+    net = Generator256(dim_z, grid=ck["grid"], image_size=256, n_classes=n_classes, cond_dim=ck["cond_dim"],
+                       width=ck["width"], n_res=ck["n_res"]).to(dev).eval()
 net.load_state_dict(sd)
 ref = np.load(a.fid_stats); mu, sig = ref["mu"], ref["sigma"]
 g = torch.Generator(device=dev).manual_seed(a.seed)
