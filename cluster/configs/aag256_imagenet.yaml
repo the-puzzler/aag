@@ -1,0 +1,38 @@
+# ImageNet 256, class-conditional, one 8xB200 node:
+#   download -> 8-way encode -> FID stats + 300k-step hierarchy assignment (GPU 0) -> 8-GPU generator.
+# The assignment interleaves size-weighted group transport over every WordNet level
+# (joint 1000 / depth7 225 / depth6 85 / depth5 38 / depth4 20 / living / animal / dog).
+name: aag256_imagenet
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/imagenet256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('benjamin-paine/imagenet-1k-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/imagenet-1k-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)" &&
+      cp cluster/assets/class_groups.pt $D/imagenet256/ && df -h /mnt/shared
+  - name: encode
+    ddp: true
+    cmd: python scripts/encode_hf256.py --dataset imagenet256 --amp --workers 12 --out $D/imagenet256/particles_dcae_f32c32.pt
+  - name: merge
+    cmd: python scripts/encode_hf256.py --dataset imagenet256 --merge --world 8 --out $D/imagenet256/particles_dcae_f32c32.pt
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset imagenet256 --n 50000 --out $D/imagenet256/fid_stats_train_50000.npz
+  - name: assign
+    cmd: >-
+      python scripts/run_assignment_classes.py --particles $D/imagenet256/particles_dcae_f32c32.pt
+      --groups $D/imagenet256/class_groups.pt --levels joint,depth7,depth6,depth5,depth4,living,animal,dog
+      --steps 300000 --grp-per-step 8 --cond-alpha 0.5 --max-group 32768
+      --eval-every 5000 --eval-k 4096 --save-every 50000 --keep-checkpoints
+      --out $R/imagenet/assign/assign_cls_300k.pt
+  - name: generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $R/imagenet/assign/assign_cls_300k.pt --dataset imagenet256
+      --width 1.5 --n-res 3 --epochs 40 --batch 32 --lr 2e-4 --warmup 2000 --val-frac 0.01 --eval-every 2
+      --fid-stats $D/imagenet256/fid_stats_train_50000.npz --fid-n 10000 --log-every 200 --out $R/imagenet/gen_cls_300k
