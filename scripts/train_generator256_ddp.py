@@ -63,6 +63,17 @@ ap.add_argument("--decode-workers", type=int, default=0, help="0 = cpu_count // 
 ap.add_argument("--resume", default=None, help="checkpoint path, or 'auto' = latest gen_ep*.pt under --out")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", type=Path, required=True)
+# --- pairwise adversary (user, 2026-09-05): a finetune on the converged plain generator.
+# The critic sees real and generated images for the SAME z stacked on the channel axis in a
+# random order and says which side is real (aag.discriminator.paired_*). No AE adversary: a
+# linear probe showed an AE adversary changes only the decoder, which AAG throws away.
+ap.add_argument("--gan-weight", type=float, default=0.0, help="0 = off; scales the adaptively balanced adversarial term")
+ap.add_argument("--gan-lr", type=float, default=4.5e-5)
+ap.add_argument("--gan-ndf", type=int, default=64)
+ap.add_argument("--gan-layers", type=int, default=3, help="3 = 70px receptive field, 2 = 34px")
+ap.add_argument("--gan-fixed", action="store_true", help="use --gan-weight as a fixed weight instead of adaptive x weight")
+ap.add_argument("--reset-schedule", action="store_true",
+                help="with --resume: fresh warmup+cosine over the remaining epochs (finetune) instead of continuing the old one")
 a = ap.parse_args()
 
 # ---------------------------------------------------------------- distributed
@@ -137,6 +148,13 @@ for p in perceptual.parameters():
     p.requires_grad_(False)
 
 opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.99), weight_decay=a.wd)
+adv = a.gan_weight > 0
+disc = opt_d = None
+if adv:
+    from aag.discriminator import NLayerDiscriminator, paired_batch, paired_d_loss, paired_g_loss, adaptive_weight
+    disc = NLayerDiscriminator(6, a.gan_ndf, a.gan_layers).to(dev)
+    opt_d = torch.optim.Adam(disc.parameters(), lr=a.gan_lr, betas=(0.5, 0.9))
+    pair_gen = torch.Generator(device=dev).manual_seed(4321 + rank)
 # Every rank must run the SAME number of steps per epoch: each backward is an NCCL
 # all-reduce, and the held-out mask removes a Binomial number of rows per shard, so
 # ceil(len(tr_idx)/batch) differs by one across ranks. A rank that leaves the loop
@@ -164,14 +182,35 @@ if a.resume == "auto":
     _cks = sorted((a.out / "checkpoints").glob("gen_ep*.pt")) if (a.out / "checkpoints").exists() else []
     a.resume = str(_cks[-1]) if _cks else None
     log(f"--resume auto -> {a.resume or 'no checkpoint found, starting fresh'}")
+sched0 = 0
 if a.resume:
     R = torch.load(a.resume, map_location=dev, weights_only=False)
-    model.load_state_dict(R["model"]); ema.load_state_dict(R["ema"]); opt.load_state_dict(R["opt"])
+    model.load_state_dict(R["model"]); ema.load_state_dict(R["ema"])
+    if a.reset_schedule:
+        # finetune: keep the weights, drop the old optimizer state and start a fresh schedule
+        sched0 = R["gstep"]
+        total_steps = steps_per_epoch * (a.epochs - R["epoch"])
+        def lr_at(s):
+            s = s - sched0
+            if s < a.warmup:
+                return a.lr * (s + 1) / a.warmup
+            p = (s - a.warmup) / max(1, total_steps - a.warmup)
+            return a.lr * 0.5 * (1 + math.cos(math.pi * min(1.0, p)))
+    else:
+        opt.load_state_dict(R["opt"])
+    if adv and "disc" in R:
+        disc.load_state_dict(R["disc"]); opt_d.load_state_dict(R["opt_d"])
     start_epoch, gstep, curve = R["epoch"], R["gstep"], R["curve"]
-    log(f"resumed {a.resume}: epoch {start_epoch}, step {gstep:,}, last val_mse {curve['val_mse'][-1] if curve['val_mse'] else None}")
+    log(f"resumed {a.resume}: epoch {start_epoch}, step {gstep:,}, last val_mse {curve['val_mse'][-1] if curve['val_mse'] else None}"
+        + (f"; fresh schedule: lr {a.lr}, warmup {a.warmup}, {total_steps:,} steps" if a.reset_schedule else ""))
 raw = model
 if ddp:
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local])
+    if adv:
+        disc = torch.nn.parallel.DistributedDataParallel(disc, device_ids=[local])
+if adv:
+    log(f"pairwise adversary on: weight={a.gan_weight} ({'fixed' if a.gan_fixed else 'x adaptive'}), critic ndf={a.gan_ndf} "
+        f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
 fwd = torch.compile(model) if a.compile else model
 
 log(f"generator: {n_params / 1e6:.1f}M params  width={a.width} n_res={a.n_res}  batch {a.batch}x{world}={a.batch * world}  "
@@ -231,10 +270,12 @@ def fid_fresh(net):
 
 
 t0 = time.time()
+gstep_run0 = gstep    # throughput/ETA count from here, whatever step the resume landed on
 for epoch in range(start_epoch, a.epochs):
     model.train()
     perm = tr_idx[torch.randperm(tr_idx.numel(), device=dev)]
     run_mse, run_lp, run_n = 0.0, 0.0, 0
+    run_g = run_d = run_w = 0.0
     for i in range(steps_per_epoch):
         b = perm[i * a.batch:(i + 1) * a.batch]
         for pg in opt.param_groups:
@@ -247,9 +288,27 @@ for epoch in range(start_epoch, a.epochs):
         perc = perceptual(pred.clamp(-1, 1), tgt).mean() if a.lpips_weight > 0 else torch.zeros((), device=dev)
         loss = mse + a.lpips_weight * perc
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        if adv:
+            # generator step: fool the pair critic; the adaptive weight measures the adversarial
+            # gradient against the reconstruction gradient at the generator's last conv
+            pair, lab = paired_batch(tgt, pred.clamp(-1, 1), pair_gen)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                g_adv = paired_g_loss(disc(pair).float(), lab)
+            w = torch.tensor(a.gan_weight, device=dev) if a.gan_fixed else adaptive_weight(loss, g_adv, raw.out.weight) * a.gan_weight
+            (loss + w * g_adv).backward()
+        else:
+            loss.backward()
         torch.nn.utils.clip_grad_norm_(raw.parameters(), a.grad_clip)
         opt.step()
+        if adv:
+            # critic step on the same pairs with the generator output detached
+            pair_d, lab_d = paired_batch(tgt, pred.detach().clamp(-1, 1), pair_gen)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                d_loss = paired_d_loss(disc(pair_d).float(), lab_d)
+            opt_d.zero_grad(set_to_none=True)
+            d_loss.backward()
+            opt_d.step()
+            run_g += g_adv.item() * b.numel(); run_d += d_loss.item() * b.numel(); run_w += float(w) * b.numel()
         with torch.no_grad():
             for pe, pm in zip(ema.parameters(), raw.parameters()):
                 pe.lerp_(pm, 1 - a.ema)
@@ -257,8 +316,10 @@ for epoch in range(start_epoch, a.epochs):
         run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel()
         if is_main and gstep % a.log_every == 0:
             el = time.time() - t0
-            print(f"  ep {epoch + 1} step {gstep:,}/{total_steps:,}  mse {run_mse / run_n:.5f}  lpips {run_lp / run_n:.4f}  "
-                  f"lr {lr_at(gstep):.2e}  {gstep * a.batch * world / el:,.0f} img/s  eta {(total_steps - gstep) * el / max(gstep - start_epoch * steps_per_epoch, 1) / 3600:.1f} h",
+            print(f"  ep {epoch + 1} step {gstep - sched0:,}/{total_steps:,}  mse {run_mse / run_n:.5f}  lpips {run_lp / run_n:.4f}  "
+                  + (f"g {run_g / run_n:.3f} d {run_d / run_n:.3f} w {run_w / run_n:.3g}  " if adv else "") +
+                  f"lr {lr_at(gstep):.2e}  {(gstep - gstep_run0) * a.batch * world / el:,.0f} img/s  "
+                  f"eta {(total_steps - (gstep - sched0)) * el / max(gstep - gstep_run0, 1) / 3600:.1f} h",
                   flush=True)
     tr_mse, tr_lp = all_reduce_mean(run_mse / max(run_n, 1), run_n), all_reduce_mean(run_lp / max(run_n, 1), run_n)
     curve["epoch"].append(epoch + 1); curve["train_mse"].append(tr_mse); curve["train_lpips"].append(tr_lp)
@@ -280,6 +341,7 @@ for epoch in range(start_epoch, a.epochs):
             save_image((pair + 1) / 2, a.out / f"heldout_pairs_ep{epoch + 1:03d}.png", nrow=8)
             ck = a.out / "checkpoints" / f"gen_ep{epoch + 1:03d}.pt"
             torch.save({"model": raw.state_dict(), "ema": ema.state_dict(), "opt": opt.state_dict(),
+                        **({"disc": (disc.module if ddp else disc).state_dict(), "opt_d": opt_d.state_dict()} if adv else {}),
                         "epoch": epoch + 1, "gstep": gstep, "curve": curve, "args": vars(a), "dim_z": dim_z,
                         "grid": grid, "n_classes": n_classes, "width": a.width, "n_res": a.n_res,
                         "cond_dim": a.cond_dim, "assignment": a.assignment}, str(ck) + ".tmp")
