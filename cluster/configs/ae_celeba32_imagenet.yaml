@@ -1,0 +1,30 @@
+# One node, 8 single-GPU AE runs (job matteo-exp-3), user 2026-09-05:
+#  - CelebA-HQ only (no FFHQ: the comparison paper uses CelebA-HQ), tighter bottlenecks: d32 and d16 (4x4 grid).
+#  - ImageNet: own compact AEs (TiTok-512 reconstructs ImageNet at 0.056/0.328; DC-AE-2048 at 0.025/0.165);
+#    d256/d512/d1024 on 4x4 and 8x8 grids, trained on the first 300k train rows (RAM: 59 GB uint8 per run).
+name: ae_celeba32_imagenet
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  R: /mnt/shared/aag/results_scale256
+  CEL: >-
+    --dataset celebahq256 --data /mnt/shared/aag/hf --image-size 256 --lpips-weight 0.5 --amp --compile
+    --batch 128 --lr 1e-3 --epochs 100 --eval-every 5 --log-every 200 --loader-workers 6
+  IMN: >-
+    --dataset imagenet256 --data /mnt/shared/aag/hf --n-train 300000 --image-size 256 --lpips-weight 0.5 --amp --compile
+    --batch 128 --lr 1e-3 --epochs 20 --eval-every 2 --log-every 500 --loader-workers 6
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $R/celebahq_ae $R/imagenet_ae && python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16);
+      s('benjamin-paine/imagenet-1k-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/imagenet-1k-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: ae_sweep
+    parallel:
+      - {name: cel_dcae_d32_g4_c128,  gpus: "0", cmd: "python scripts/train_ae.py $CEL --arch dcae --dim 32 --grid 4 --ch 128 --out $R/celebahq_ae/dcae_d32_g4_c128"}
+      - {name: cel_dcae_d16_g4_c128,  gpus: "1", cmd: "python scripts/train_ae.py $CEL --arch dcae --dim 16 --grid 4 --ch 128 --out $R/celebahq_ae/dcae_d16_g4_c128"}
+      - {name: imn_dcae_d256_g4_c128,  gpus: "2", cmd: "python scripts/train_ae.py $IMN --arch dcae --dim 256 --grid 4 --ch 128 --out $R/imagenet_ae/dcae_d256_g4_c128"}
+      - {name: imn_dcae_d512_g4_c128,  gpus: "3", cmd: "python scripts/train_ae.py $IMN --arch dcae --dim 512 --grid 4 --ch 128 --out $R/imagenet_ae/dcae_d512_g4_c128"}
+      - {name: imn_dcae_d1024_g4_c128, gpus: "4", cmd: "python scripts/train_ae.py $IMN --arch dcae --dim 1024 --grid 4 --ch 128 --out $R/imagenet_ae/dcae_d1024_g4_c128"}
+      - {name: imn_dcae_d256_g8_c128,  gpus: "5", cmd: "python scripts/train_ae.py $IMN --arch dcae --dim 256 --grid 8 --ch 128 --out $R/imagenet_ae/dcae_d256_g8_c128"}
+      - {name: imn_dcae_d512_g8_c128,  gpus: "6", cmd: "python scripts/train_ae.py $IMN --arch dcae --dim 512 --grid 8 --ch 128 --out $R/imagenet_ae/dcae_d512_g8_c128"}
+      - {name: imn_dcae_d1024_g8_c128, gpus: "7", cmd: "python scripts/train_ae.py $IMN --arch dcae --dim 1024 --grid 8 --ch 128 --out $R/imagenet_ae/dcae_d1024_g8_c128"}

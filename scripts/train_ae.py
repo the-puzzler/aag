@@ -129,6 +129,8 @@ def main():
     ap.add_argument("--eval-every", type=int, default=10)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--data", default="/data/hf_cache")
+    ap.add_argument("--n-train", type=int, default=None,
+                    help="use only the first N training rows (hf256 datasets: ImageNet at 256x256 is 252 GB uint8 in RAM)")
     ap.add_argument("--out", type=Path, default=Path("results_celeba"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--amp", action="store_true",
@@ -187,7 +189,7 @@ def main():
 
     train_loader, _, test_loader, n_avail = get_loaders(
         args.dataset, args.data, args.batch, n_particles=1,
-        workers=args.loader_workers, image_size=args.image_size)
+        workers=args.loader_workers, image_size=args.image_size, n_train=args.n_train)
     print(f"AE trains on {n_avail} {args.dataset} samples at {args.image_size}x{args.image_size}, "
           f"arch={args.arch}, lpips_weight={args.lpips_weight}, topk_frac={args.topk_frac}, "
           f"topk_add_frac={args.topk_add_frac}, topk_add_weight={args.topk_add_weight}, "
