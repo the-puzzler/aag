@@ -22,11 +22,24 @@ from scipy import stats
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+_QUANTILE_CACHE: dict = {}
+
+
 def _gaussian_quantiles(n: int, device, dtype) -> torch.Tensor:
-    """q_i = Phi^{-1}((rank_i + 1/2)/n), sorted ascending (report 1.2)."""
-    ranks = torch.arange(n, device=device, dtype=dtype)
-    u = (ranks + 0.5) / n
-    return torch.special.ndtri(u)
+    """q_i = Phi^{-1}((rank_i + 1/2)/n), sorted ascending (report 1.2).
+
+    Cached per (n, device, dtype): the full-dataset vector (N = 1.28M for
+    ImageNet) is identical on every global step, and the small ones recur too.
+    """
+    key = (n, str(device), dtype)
+    q = _QUANTILE_CACHE.get(key)
+    if q is None:
+        ranks = torch.arange(n, device=device, dtype=dtype)
+        q = torch.special.ndtri((ranks + 0.5) / n)
+        if len(_QUANTILE_CACHE) >= 64:
+            _QUANTILE_CACHE.pop(next(iter(_QUANTILE_CACHE)))
+        _QUANTILE_CACHE[key] = q
+    return q
 
 
 def whiten(h: torch.Tensor, rotate: bool = True):
@@ -79,12 +92,16 @@ def _rand_unit(k: int, d: int, device, dtype) -> torch.Tensor:
 # --------------------------------------------------------------------------- #
 # 1.2  greedy global rank transport
 # --------------------------------------------------------------------------- #
-def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen):
+def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen, return_score=True):
     """One global step: find the most non-Gaussian projection, rank-transport it.
 
     Direction search uses only `search_subset` points (report 1.2: "the
     direction search is performed on a fixed-size subset"); the winning update
     is then applied to the *full* dataset.
+
+    return_score=False skips the one host sync this step needs (reading the
+    winning score back); at 1.28M particles the syncs, not the FLOPs, were the
+    cost when the GPU is shared.
     """
     N, d = z.shape
     m = min(search_subset, N)
@@ -97,7 +114,7 @@ def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen):
     s, _ = torch.sort(proj, dim=0)
     q = _gaussian_quantiles(m, z.device, z.dtype).unsqueeze(1)
     scores = ((s - q) ** 2).mean(0)
-    best = int(torch.argmax(scores))
+    best = torch.argmax(scores)
     a = dirs[best]                                        # a*
 
     # full-dataset rank transport along a*
@@ -107,7 +124,7 @@ def greedy_rank_transport_step(z, *, search_subset, n_dirs, alpha, gen):
     target = torch.empty_like(proj_full)
     target[order] = q_full                                # target[i] = q at rank of i
     z.add_(alpha * (target - proj_full).unsqueeze(1) * a.unsqueeze(0))
-    return float(scores[best])
+    return float(scores[best]) if return_score else None
 
 
 # --------------------------------------------------------------------------- #
@@ -406,6 +423,7 @@ def action_dist_knn_transport_step(z, cond, act_vec, *, k, k_act, n_dirs, alpha,
 # 1.2c  discrete-group conditional rank transport
 # --------------------------------------------------------------------------- #
 _GROUP_CACHE = {}
+_GROUP_PICKS: dict = {}
 
 
 def _group_weights(group_ids, max_group):
@@ -426,21 +444,43 @@ def _group_weights(group_ids, max_group):
     key = (group_ids.data_ptr(), tuple(group_ids.shape), max_group)
     hit = _GROUP_CACHE.get(key)
     if hit is not None:
-        return hit
+        return hit[:2]
     groups, counts = torch.unique(group_ids, return_counts=True)
     cap = counts.clamp(max=max_group) if max_group else counts
     wts = counts.to(torch.float32) / cap.to(torch.float32)
+    # CSR view of the grouping: members of groups[g] are order[off[g]:off[g+1]].
+    # Slicing it replaces a `(group_ids == gi).nonzero()` pass over every particle
+    # per firing (a host sync plus a full read of the ids) with a host-side slice.
+    order = torch.argsort(group_ids, stable=True)
+    off = [0] + torch.cumsum(counts, 0).tolist()
     # keep several: an interleaved run cycles between groupings inside one step,
     # and a single-entry cache would re-run torch.unique over 512k ids every
-    # firing. These are tiny (one entry per distinct group id).
+    # firing. These are small (one entry per distinct group id, plus one index
+    # per particle for the CSR order).
     while len(_GROUP_CACHE) >= 16:
         _GROUP_CACHE.pop(next(iter(_GROUP_CACHE)))
-    _GROUP_CACHE[key] = (groups, wts)
+    _GROUP_CACHE[key] = (groups, wts, order, off)
     return groups, wts
 
 
+def _group_members(group_ids, max_group, gen):
+    """Sample one group (size-weighted, see _group_weights) and return its member indices.
+
+    One host sync (the sampled group id); the member slice comes from the cached CSR order.
+    """
+    _group_weights(group_ids, max_group)
+    key = (group_ids.data_ptr(), tuple(group_ids.shape), max_group)
+    groups, wts, order, off = _GROUP_CACHE[key]
+    queue = _GROUP_PICKS.setdefault(key, [])
+    if not queue:
+        # one readback per 4096 firings instead of one per firing
+        queue.extend(torch.multinomial(wts, 4096, replacement=True, generator=gen).tolist())
+    g = queue.pop()
+    return order[off[g]:off[g + 1]]
+
+
 def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=None,
-                              size_weighted=True):
+                              size_weighted=True, return_score=True):
     """Conditional transport for DISCRETE, disjoint condition groups.
 
     conditional_rank_transport_step approximates "same condition" by a k-NN
@@ -455,18 +495,17 @@ def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=Non
     """
     N, d = z.shape
     if size_weighted:
-        groups, wts = _group_weights(group_ids, max_group)
-        gi = groups[int(torch.multinomial(wts, 1, generator=gen))]
+        idx = _group_members(group_ids, max_group, gen)
     else:
         groups = torch.unique(group_ids)
         gi = groups[int(torch.randint(len(groups), (1,), device=z.device,
                                       generator=gen))]
-    idx = (group_ids == gi).nonzero(as_tuple=True)[0]
+        idx = (group_ids == gi).nonzero(as_tuple=True)[0]
     if max_group is not None and idx.numel() > max_group:
         idx = idx[torch.randperm(idx.numel(), device=z.device, generator=gen)[:max_group]]
     m = idx.numel()
     if m < 64:
-        return 0.0
+        return 0.0 if return_score else None
     zs = z[idx]
 
     dirs = _rand_unit(n_dirs, d, z.device, z.dtype)
@@ -474,7 +513,7 @@ def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=Non
     s, _ = torch.sort(proj, dim=0)
     q = _gaussian_quantiles(m, z.device, z.dtype).unsqueeze(1)
     scores = ((s - q) ** 2).mean(0)
-    best = int(torch.argmax(scores))
+    best = torch.argmax(scores)
     a = dirs[best]
 
     proj_sub = zs @ a
@@ -482,13 +521,13 @@ def group_rank_transport_step(z, group_ids, *, n_dirs, alpha, gen, max_group=Non
     target = torch.empty_like(proj_sub)
     target[order] = _gaussian_quantiles(m, z.device, z.dtype)
     z[idx] = zs + alpha * (target - proj_sub).unsqueeze(1) * a.unsqueeze(0)
-    return float(scores[best])
+    return float(scores[best]) if return_score else None
 
 
 # --------------------------------------------------------------------------- #
 # 1.3  conditional offset-slab cleanup
 # --------------------------------------------------------------------------- #
-def offset_slab_cleanup_step(z, *, search_subset, n_slabs, eps, alpha, gen):
+def offset_slab_cleanup_step(z, *, search_subset, n_slabs, eps, alpha, gen, return_score=True):
     """Localize a slab |n^T z - b| < eps, Gaussianize an orthogonal tangent there.
 
     For a true standard Gaussian, an orthogonal coordinate is still N(0,1)
@@ -500,42 +539,60 @@ def offset_slab_cleanup_step(z, *, search_subset, n_slabs, eps, alpha, gen):
     idx = torch.randperm(N, device=z.device, generator=gen)[:m]
     zs = z[idx]
 
-    best = None  # (score, n, b, t)
-    for _ in range(n_slabs):
-        nrm = _rand_unit(1, d, z.device, z.dtype)[0]
-        t = _rand_unit(1, d, z.device, z.dtype)[0]
-        t = t - (t @ nrm) * nrm
-        t = t / t.norm()
-        pn = zs @ nrm
-        b = pn[torch.randint(m, (1,), device=z.device, generator=gen)].item()
-        mask = (pn - b).abs() < eps
-        if int(mask.sum()) < 64:
-            continue
-        score = float(w2_to_standard_normal((zs[mask] @ t)))
-        if best is None or score > best[0]:
-            best = (score, nrm, b, t)
-    if best is None:
-        return 0.0
+    # Score all n_slabs candidates at once. The per-slab loop this replaces did
+    # ~3 host syncs per slab (~100 per call); at ImageNet scale on a shared GPU
+    # that was 170 ms of a 380 ms step. Same candidates, same score, one sync.
+    S = n_slabs
+    nrm = _rand_unit(S, d, z.device, z.dtype)                       # slab normals
+    t = _rand_unit(S, d, z.device, z.dtype)
+    t = t - (t * nrm).sum(1, keepdim=True) * nrm                    # tangent orthogonal to its normal
+    t = t / t.norm(dim=1, keepdim=True)
+    pn = zs @ nrm.T                                                 # (m, S)
+    pick = torch.randint(m, (S,), device=z.device, generator=gen)
+    b = pn[pick, torch.arange(S, device=z.device)]                  # slab centre = a sample's projection
+    mask = (pn - b).abs() < eps                                     # (m, S) membership
+    cnt = mask.sum(0)                                               # members per slab
+    coord = zs @ t.T                                                # (m, S) tangent coordinate
+    # W2^2 to N(0,1) per slab: sort members first (non-members -> +inf) and match
+    # the first cnt_j entries to the quantiles (i + 1/2) / cnt_j, exactly as
+    # w2_to_standard_normal does for one slab.
+    s, _ = torch.sort(torch.where(mask, coord, torch.full_like(coord, float("inf"))), dim=0)
+    i = torch.arange(m, device=z.device, dtype=z.dtype).unsqueeze(1)
+    cntf = cnt.to(z.dtype).clamp_min(1).unsqueeze(0)
+    q = torch.special.ndtri((i + 0.5) / cntf)
+    gap = torch.where(i < cntf, (s - q) ** 2, torch.zeros_like(s))
+    score = gap.sum(0) / cntf.squeeze(0)
+    score = torch.where(cnt >= 64, score, torch.full_like(score, -1.0))   # too few members: not a candidate
+    best = torch.argmax(score)
+    nrm, b, t = nrm[best], b[best], t[best]
 
-    _, nrm, b, t = best
+    # Apply the winning slab's transport to its members. Gathering the members
+    # (one host sync, for the dynamic size) beats a masked update over all of z:
+    # a full pass is 10.5 GB at ImageNet scale and bandwidth, not the sync, is
+    # what a gather saves. `member &= ok` makes "no valid slab" a zero-row no-op.
     pn_full = z @ nrm
-    mask = (pn_full - b).abs() < eps
-    if int(mask.sum()) < 8:
-        return best[0]
-    sub = z[mask]
+    member = (pn_full - b).abs() < eps
+    member &= score[best] >= 0
+    sel = member.nonzero(as_tuple=True)[0]
+    n_sel = sel.numel()
+    if n_sel < 8:
+        return float(score[best].clamp_min(0)) if return_score else None
+    sub = z[sel]
     coord = sub @ t
     order = torch.argsort(coord)
-    q = _gaussian_quantiles(int(mask.sum()), z.device, z.dtype)
     target = torch.empty_like(coord)
-    target[order] = q
+    target[order] = _gaussian_quantiles(n_sel, z.device, z.dtype)
     sub.add_(alpha * (target - coord).unsqueeze(1) * t.unsqueeze(0))
-    z[mask] = sub
-    return best[0]
+    z[sel] = sub
+    return float(score[best]) if return_score else None
 
 
 # --------------------------------------------------------------------------- #
 # 1.4  radial chi_d calibration
 # --------------------------------------------------------------------------- #
+_CHI_CACHE: dict = {}
+
+
 def radial_chi_calibration(z, *, d, alpha_r):
     """Rank-correct radii toward the exact Gaussian shell r ~ chi_d (report 1.4).
 
@@ -545,10 +602,14 @@ def radial_chi_calibration(z, *, d, alpha_r):
     N = z.shape[0]
     r = z.norm(dim=1)
     order = torch.argsort(r)
-    u = (torch.arange(N, device=z.device, dtype=torch.float64) + 0.5) / N
-    r_target = torch.as_tensor(
-        stats.chi.ppf(u.cpu().numpy(), df=d), device=z.device, dtype=z.dtype
-    )
+    key = (N, d, str(z.device), z.dtype)
+    r_target = _CHI_CACHE.get(key)
+    if r_target is None:
+        # scipy's ppf over N points runs on the CPU (~0.6 s at N = 1.28M) and the
+        # answer never changes for a given (N, d), so it is computed once per run.
+        u = (torch.arange(N, dtype=torch.float64) + 0.5) / N
+        r_target = torch.as_tensor(stats.chi.ppf(u.numpy(), df=d), device=z.device, dtype=z.dtype)
+        _CHI_CACHE.clear(); _CHI_CACHE[key] = r_target
     target = torch.empty_like(r)
     target[order] = r_target
     scale = (1 - alpha_r) + alpha_r * target / r.clamp_min(1e-12)

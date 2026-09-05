@@ -124,17 +124,22 @@ def save(path, partial):
 
 t0 = time.time()
 for step in range(1, a.steps + 1):
-    obj = greedy_rank_transport_step(z, search_subset=a.search_subset, n_dirs=a.n_dirs, alpha=a.alpha, gen=gen)
+    is_eval = step % a.eval_every == 0 or step == 1
+    # scores are read back only on eval steps: every readback is a host sync, and at
+    # 1.28M particles on a shared GPU the syncs cost more than the transport itself
+    obj = greedy_rank_transport_step(z, search_subset=a.search_subset, n_dirs=a.n_dirs, alpha=a.alpha, gen=gen,
+                                     return_score=is_eval)
     if a.cleanup_every and step % a.cleanup_every == 0:
-        offset_slab_cleanup_step(z, search_subset=a.search_subset, n_slabs=32, eps=0.5, alpha=1.0, gen=gen)
+        offset_slab_cleanup_step(z, search_subset=a.search_subset, n_slabs=32, eps=0.5, alpha=1.0, gen=gen,
+                                 return_score=False)
     for lv in levels:
         for _ in range(grp_per):
             group_rank_transport_step(z, grp_ids[lv], n_dirs=a.n_dirs, alpha=a.cond_alpha, gen=gen,
-                                      max_group=a.max_group, size_weighted=True)
+                                      max_group=a.max_group, size_weighted=True, return_score=False)
     if a.chi_every and step % a.chi_every == 0:
         radial_chi_calibration(z, d=d, alpha_r=1.0)
 
-    if step % a.eval_every == 0 or step == 1:
+    if is_eval:
         G = gdefect(z); disp = float((z - z_ref).norm(dim=1).mean())
         floor = random_subset_w2(z, k=a.eval_k, n_eval=20, gen=gen)
         curve["step"].append(step0 + step); curve["G"].append(G); curve["disp"].append(disp); curve["floor"].append(floor)
