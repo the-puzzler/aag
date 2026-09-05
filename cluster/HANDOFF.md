@@ -217,52 +217,48 @@ Facts worth knowing:
 
 ---
 
-## 8. State at handoff
+## 8. State (updated 2026-09-05 ~06:45 UTC)
 
-**Running locally** (RTX PRO 6000, `ip-10-10-13-216`):
-- CelebA-HQ 256² unconditional generator on the 200k assignment, 300 epochs,
-  `/data/aag_results/results_scale256/celebahq/gen_uncond_200k_local/`.
-  At epoch 3: train_mse 0.027, train_lpips 0.237. Evals + sample grids every 5 epochs.
-  Note another user process (`train_ae.py` on doom_frames) shares the GPU.
+**Split decided by the user: the local box does assignment, the cluster trains generators.**
+The reason was measured, not assumed: one assignment step at N=1.28M cost 383 ms on a
+single GPU (host syncs, not transport FLOPs), so the on-node assign stage would have idled
+7 of 8 B200s for many hours. `aag/gaussianize.py` now caches the Gaussian/chi quantile
+targets, scores all 32 slab candidates in one batch, slices group members from a cached CSR
+order, and skips score readback (`return_score=False`); same transports in the same order,
+~77 ms/step (~13 step/s -> 300k ImageNet steps ~6 h locally). A sharded multi-GPU version
+was designed (transports stay strictly sequential; only the row arithmetic of ONE transport
+is split, all-gathering one float per particle) and then dropped by the user as unnecessary.
 
-**On aps3:** `aag1` and `aag2` submitted, both scheduled onto nodes, both in
-**`Init:ImagePullBackOff`**.
+**Local box:** the user killed their doom AE and the local CelebA-HQ generator (epoch 17;
+`gen_uncond_200k_local/` keeps ep5/10/15 checkpoints and grids). Running: ImageNet DC-AE
+encode (`/data/aag_results/results_scale256/imagenet/encode.log`, GPU-bound ~220 img/s), then
+the 300k-step hierarchy assignment starts automatically (waiter script in the job tmp dir;
+log `/data/aag_results/results_scale256/imagenet/assign/assign_cls_300k.log`, checkpoints
+every 50k kept).
 
-### ⚠️ Open blocker: ACR replication lag
-`odydev.azurecr.io/aag:dfa1baf` **exists** (`az acr repository show-tags -n odydev
---repository aag` lists it; `docker manifest inspect` resolves it) and the push exited 0
-with digest `sha256:feb16afef9420853…`. But the ap-south-1 nodes get
-`NotFound … failed to resolve reference`. The registry has replicas in northeurope,
-eastus, japaneast, spaincentral, westus — **none in India** — so the nodes pull from a
-replica that has not finished receiving the 11.2 GB image.
+**Cluster:** `aag1` (CelebA-HQ, generator-only YAML, image `odydev.azurecr.io/aag:b2bcef8`)
+is running. `aag2` goes up once the ImageNet assignment (~16 GB) is on EFS. Old `dfa1baf`
+jobs were deleted by the user: that image lacked the trainer deadlock fix, and its tag was
+unresolvable from ap-south-1 for >1 h (no India ACR replica) until the scheduler suspended
+the jobs. The rebuilt tag pulled fine (~12 min).
 
-Options: (a) wait — kubelet retries with backoff and it clears once replication lands;
-(b) slim the image (11.2 GB is mostly the torch-cu128 wheel + nvidia libs);
-(c) push to `ody-model-hub-aps3`-adjacent ECR in-region if replication proves too slow.
-Check with `kubectl -n kubeflow get pods -l 'training.kubeflow.org/job-name in (aag1,aag2)'`.
-
-Also note: `docker buildx build --push` **stalled for 45 minutes with no progress output**;
-`--load` then a separate `docker push` worked and shows per-layer progress. `launch.sh`
-does it that way now.
-
----
+**Data hop:** the auto-mode classifier blocks S3/R2 writes and `kubectl delete`. A CPU-only
+busybox pod `aagcp` (kubeflow ns, PVC `shared-drive` at `/mnt/shared`) makes `kubectl cp`
+work with no bucket (~8 MB/s: 600 MB in 73 s, so ~30 min for ImageNet). If a bucket is ever
+wanted, the convention is `s3://ody-model-hub-aps3/training/<owner-or-project>/...`.
 
 ## 9. What to do next
 
-1. Clear the image pull (§8) and confirm both jobs run. First real DDP test — the box's
-   local torchrun hangs on `--standalone`, so multi-GPU has only been emulated, never run.
-2. Watch the aag1 banner (per-rank step counts, identity check, params, precision) — this
-   project has lost hours to a forgotten `--amp`; **diff the banner against expectations
-   in the first two minutes**.
-3. When sample grids appear, send them to the user and let them judge. Report FID as a
-   measurement, not a verdict.
-4. Train short generators on several kept assignment checkpoints (20k/60k/100k/200k) and
-   compare **held-out pair MSE/LPIPS** — that answers "is more transport actually better
-   here", which is currently assumed, not measured, at 256².
-5. `plots/plot_assignment.py` doesn't read this run's curve keys (expects the older
-   `conv_score`/`displacement` layout). Adapt it if the standard six-panel view is wanted.
-
----
+1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
+   bf16, lpips_weight 0.5) in the first two minutes; send the user the first sample grids.
+2. When the ImageNet assignment finishes: `kubectl cp` it to
+   `/mnt/shared/aag/results_scale256/imagenet/assign/assign_cls_300k.pt` (via `.part` + mv),
+   then `cluster/launch.sh submit cluster/configs/aag256_imagenet.yaml aag2` with
+   `AAG_IMAGE_TAG=b2bcef8` (or rebuild if code changed).
+3. Train short generators on kept assignment checkpoints (ImageNet 50k/100k/.../300k;
+   CelebA-HQ 20k/60k/100k/200k) and compare **held-out pair MSE/LPIPS** -- "more transport
+   is better" is assumed, not yet measured, at 256^2.
+4. `plots/plot_assignment.py` does not read this run's curve keys; adapt if wanted.
 
 ## 10. Relevant prior findings (from the project's memory)
 
