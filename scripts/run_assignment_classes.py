@@ -45,6 +45,8 @@ ap.add_argument("--steps", type=int, default=20000)
 ap.add_argument("--search-subset", type=int, default=2048)
 ap.add_argument("--n-dirs", type=int, default=64)
 ap.add_argument("--alpha", type=float, default=1.0)
+ap.add_argument("--refine-steps", type=int, default=0,
+                help="Adam steps refining the chosen global direction on the search subset (max-sliced); 0 = random search only")
 ap.add_argument("--grp-per-step", type=int, default=8,
                 help="group-transport firings per global step, split evenly over levels")
 ap.add_argument("--cond-alpha", type=float, default=0.5)
@@ -116,7 +118,7 @@ def save(path, partial):
     torch.save({"z": z.cpu(), "h": h.half().cpu(), "label": labels.cpu(), "mean": mean.cpu(),
                 "W": W.cpu(), "W_inv": W_inv.cpu(), "z_ref": z_ref.cpu(), "curve": curve,
                 "steps": step0 + step, "levels": levels,
-                "cond_alpha": a.cond_alpha, "max_group": a.max_group, "grp_per_step": a.grp_per_step,
+                "cond_alpha": a.cond_alpha, "max_group": a.max_group, "grp_per_step": a.grp_per_step, "alpha": a.alpha, "refine_steps": a.refine_steps,
                 "particles": a.particles, "groups": a.groups, "partial": partial, **keep},
                str(path) + ".tmp")
     Path(str(path) + ".tmp").replace(path)
@@ -128,7 +130,7 @@ for step in range(1, a.steps + 1):
     # scores are read back only on eval steps: every readback is a host sync, and at
     # 1.28M particles on a shared GPU the syncs cost more than the transport itself
     obj = greedy_rank_transport_step(z, search_subset=a.search_subset, n_dirs=a.n_dirs, alpha=a.alpha, gen=gen,
-                                     return_score=is_eval)
+                                     return_score=is_eval, refine_steps=a.refine_steps)
     if a.cleanup_every and step % a.cleanup_every == 0:
         offset_slab_cleanup_step(z, search_subset=a.search_subset, n_slabs=32, eps=0.5, alpha=1.0, gen=gen,
                                  return_score=False)
