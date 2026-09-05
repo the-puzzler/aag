@@ -98,7 +98,7 @@ def test_metrics(ae, loader, device, perceptual):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", choices=["celeba","cifar10","doom","doom_frames"], default="celeba")
+    ap.add_argument("--dataset", choices=["celeba","cifar10","doom","doom_frames","celebahq256","imagenet256"], default="celeba")
     ap.add_argument("--arch", choices=["residual", "spatial", "hybrid", "dcae"], default="residual")
     ap.add_argument("--dim", type=int, default=64)
     ap.add_argument("--ch", type=int, default=64)

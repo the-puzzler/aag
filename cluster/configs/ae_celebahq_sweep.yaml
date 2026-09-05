@@ -1,0 +1,27 @@
+# CelebA-HQ 256 compact-AE sweep, one 8xB200 node, one single-GPU run per GPU (job matteo-exp-2).
+# User (2026-09-05): "worth training an autoencoder to reconstruct the images at 128 dims or
+# something more compressed, seeing as that lever probably moves fid the most". Independent-N/d:
+# 28k/128 = 219, 28k/64 = 438, 28k/256 = 109. Recon MSE/LPIPS on the 2k validation split every
+# 5 epochs decides which latent goes on to the assignment; the user's eyes decide on the sheets.
+name: ae_celebahq_sweep
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  R: /mnt/shared/aag/results_scale256/celebahq_ae
+  COMMON: >-
+    --dataset celebahq256 --data /mnt/shared/aag/hf --image-size 256 --lpips-weight 0.5 --amp --compile
+    --batch 32 --lr 1e-3 --epochs 100 --eval-every 5 --log-every 200 --loader-workers 6
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $R && python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: ae_sweep
+    parallel:
+      - {name: dcae_d128_g4_c128, gpus: "0", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 128 --out $R/dcae_d128_g4_c128"}
+      - {name: dcae_d128_g2_c128, gpus: "1", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 2 --ch 128 --out $R/dcae_d128_g2_c128"}
+      - {name: dcae_d128_g8_c128, gpus: "2", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 8 --ch 128 --out $R/dcae_d128_g8_c128"}
+      - {name: dcae_d64_g4_c128,  gpus: "3", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 64 --grid 4 --ch 128 --out $R/dcae_d64_g4_c128"}
+      - {name: dcae_d192_g4_c128, gpus: "4", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 192 --grid 4 --ch 128 --out $R/dcae_d192_g4_c128"}
+      - {name: dcae_d256_g4_c128, gpus: "5", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 256 --grid 4 --ch 128 --out $R/dcae_d256_g4_c128"}
+      - {name: dcae_d128_g4_c192, gpus: "6", cmd: "python scripts/train_ae.py $COMMON --arch dcae --dim 128 --grid 4 --ch 192 --out $R/dcae_d128_g4_c192"}
+      - {name: resid_d128_c128,   gpus: "7", cmd: "python scripts/train_ae.py $COMMON --arch residual --dim 128 --ch 128 --out $R/resid_d128_c128"}

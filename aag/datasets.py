@@ -39,6 +39,11 @@ SPECS = {
     # dynamics, not the encoder). ~3M frames, so no sample bound at all.
     "doom_frames": dict(image_size=64, n_cond=18, discrete=True, video=False,
                         default_root="/data/doom/cache_train"),
+    # 256x256 HF parquet mirrors (aag.hf256); loaders in _hf256_loaders
+    "celebahq256": dict(image_size=256, n_cond=0, discrete=False, video=False,
+                        default_root="/data/aag_data/hf"),
+    "imagenet256": dict(image_size=256, n_cond=1000, discrete=True, video=False,
+                        default_root="/data/aag_data/hf"),
 }
 
 
@@ -221,7 +226,45 @@ def get_loaders(dataset: str, root: str, batch: int, n_particles: int,
     if dataset == "doom":
         return _segment_loaders(root or SPECS["doom"]["default_root"], batch,
                             n_particles, workers, n_train)
+    if dataset in ("celebahq256", "imagenet256"):
+        return _hf256_loaders(dataset, root, batch, n_particles, workers, n_train)
     raise ValueError(dataset)
+
+
+class _U8Images(torch.utils.data.Dataset):
+    """In-memory uint8 (N,H,W,3) -> float (3,H,W) in [-1,1], with an int label."""
+
+    def __init__(self, x_u8, labels):
+        self.x, self.y = x_u8, labels
+
+    def __len__(self):
+        return self.x.shape[0]
+
+    def __getitem__(self, i):
+        return self.x[i].permute(2, 0, 1).float().div_(127.5).sub_(1.0), int(self.y[i])
+
+
+def _hf256_loaders(dataset, root, batch, n_particles, workers, n_train):
+    """The 256x256 HF parquet mirrors (aag.hf256), decoded once into RAM.
+
+    Used to train a compact own AE (user, 2026-09-05: independent-N/d is the lever that
+    moves FID most; a ~128-d latent for CelebA-HQ). Train split for the AE and as the
+    particle set, the validation split as the held-out test set. CelebA-HQ is 5.5 GB uint8;
+    ImageNet would be 252 GB, so pass n_train for that.
+    """
+    from .hf256 import load_uint8, manifest
+    root = root if root and root != "/data/hf_cache" else "/data/aag_data/hf"
+    n = manifest(root, dataset)["offsets"][-1]
+    n_use = min(n_train or n, n)
+    x, y = load_uint8(root, dataset, 0, n_use, workers=workers or 8)
+    xt, yt = load_uint8(root, dataset, 0, min(2000, manifest(root, dataset, "validation")["offsets"][-1]),
+                        split="validation", workers=workers or 8)
+    full = _U8Images(x, y)
+    particles = torch.utils.data.Subset(full, range(min(n_particles, n_use)))
+    ae_loader = DataLoader(full, batch, shuffle=True, num_workers=workers, pin_memory=True, drop_last=True)
+    enc_loader = DataLoader(particles, batch, shuffle=False, num_workers=workers)
+    test_loader = DataLoader(_U8Images(xt, yt), batch, shuffle=False, num_workers=workers)
+    return ae_loader, enc_loader, test_loader, n_use
 
 
 def collect_particle_images(dataset: str, root: str, batch: int, n_particles: int,
