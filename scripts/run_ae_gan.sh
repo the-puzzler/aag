@@ -69,7 +69,7 @@
 set -uo pipefail
 WT=/home/ubuntu/exp/newgen/.claude/worktrees/vpt-cache-hardening
 PY=/home/ubuntu/exp/newgen/.venv/bin/python
-CK=/data/aag_results/results_vpt/ae_dcae_ch192_dim256_cont/checkpoints/ae_doom_frames_dcae_lpips_ch192_dim256_ep4.pt
+CK=/data/aag_results/results_vpt/ae_dcae_ch192_dim256_gan/checkpoints/ae_doom_frames_dcae_lpips_ch192_dim256_ep1.pt
 cd "$WT" || exit 1
 
 echo "=== AE + adversary, resumed from 9 epochs $(date -u +%H:%M:%S) ==="
@@ -81,8 +81,8 @@ PYTHONPATH=$WT "$PY" scripts/train_ae.py \
   --gan-weight 0.5 --gan-start-epoch 1 --gan-layers 2 --gan-ndf 64 \
   --gan-lr 4.5e-5 \
   --amp --loader-workers 12 --log-every 500 \
-  --epochs 6 --batch 128 --lr 1e-4 --eval-every 1 \
+  --epochs 5 --batch 128 --lr 1e-4 --eval-every 1 \
   --out /data/aag_results/results_vpt/ae_dcae_ch192_dim256_gan \
-  > /data/vpt/ae_gan.log 2>&1
+  > /data/vpt/ae_gan2.log 2>&1
 echo "=== AE exited rc=$? $(date -u +%H:%M:%S) ==="
-tail -5 /data/vpt/ae_gan.log
+tail -5 /data/vpt/ae_gan2.log
