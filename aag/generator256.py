@@ -117,7 +117,8 @@ class Generator256(nn.Module):
             self.grid, self.cz = grid, dim_z // (grid * grid)
         n_up = (image_size // grid).bit_length() - 1
         assert grid << n_up == image_size, "image_size must be grid * 2^k"
-        chans = [max(16, int(c * width)) for c in base_channels[:n_up]]
+        # channels rounded to multiples of 32 so any width works with 32-group GroupNorm
+        chans = [max(32, int(round(c * width / 32)) * 32) for c in base_channels[:n_up]]
         if len(chans) < n_up:
             chans += [chans[-1]] * (n_up - len(chans))
         self.n_classes = n_classes
