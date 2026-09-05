@@ -64,7 +64,8 @@ if a.encoder.endswith(".pt"):
     ck = torch.load(a.encoder, map_location=dev, weights_only=False)
     ae = AutoEncoder(ck["latent_dim"], ch=ck["channels"], architecture=ck["architecture"],
                      image_size=ck["image_size"], grid=ck.get("grid", 4)).to(dev).eval()
-    ae.load_state_dict(ck["model_state_dict"])
+    # checkpoints written under torch.compile carry an "_orig_mod." prefix on every key
+    ae.load_state_dict({k.replace("_orig_mod.", "", 1): v for k, v in ck["model_state_dict"].items()})
     grid, C = ck.get("grid", 4), ck["latent_dim"] // ck.get("grid", 4) ** 2
     encode = lambda x: ae.enc(x)
 elif a.encoder.startswith("titok:"):
