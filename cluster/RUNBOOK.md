@@ -1,10 +1,22 @@
 # AAG 256x256 scale-up on eks-train-prod-aps3 (1 node, 8x B200, project warhol)
 
 ## Pipeline (one node per dataset: `cluster/configs/aag256_celebahq.yaml`, `aag256_imagenet.yaml`)
-1. download the two HF parquet mirrors to EFS (`/mnt/shared/aag/hf`)
-2. encode both datasets with the pretrained DC-AE f32c32-in encoder (8-way sharded, ~min)
-3. assignment on GPU 0 (CelebA-HQ 200k steps, ImageNet 300k with hierarchy levels; checkpoints kept)
+Split (user's call, 2026-09-05): **the local box makes the assignment, the cluster trains the generator.**
 
+Local box (`ip-10-10-13-216`, RTX PRO 6000; run with `PYTHONPATH=<worktree>`):
+1. `scripts/encode_hf256.py --dataset imagenet256 --amp --workers 12 --batch 128` -> `/data/aag_data/imagenet256/particles_dcae_f32c32.pt`
+   (GPU-bound, ~220 img/s, ~100 min; the CelebA-HQ particles already exist)
+2. `scripts/run_assignment_classes.py` (CelebA-HQ 200k steps; ImageNet 300k with hierarchy levels,
+   `--save-every 50000 --keep-checkpoints`) -> `/data/aag_results/results_scale256/<ds>/assign/`
+3. copy the assignment to EFS through the CPU-only helper pod (no bucket needed):
+   `kubectl -n kubeflow cp <file> kubeflow/aagcp:/mnt/shared/aag/results_scale256/<ds>/assign/<file>.part`
+   then `kubectl -n kubeflow exec aagcp -- mv ....part ...` (~8 MB/s; pod spec: busybox + PVC `shared-drive`)
+
+Cluster job (`cluster/entry.py` runs the YAML stages; the YAML is mounted at submit time, so config
+changes need no image rebuild -- code changes do):
+1. download the HF parquet mirror to EFS (`/mnt/shared/aag/hf`)
+2. `wait_assignment`: `cluster/wait_for_file.py $ASSIGN` blocks until the upload exists and has stopped growing
+3. FID reference stats
 4. generator on all 8 GPUs (CelebA-HQ 38M params / 400 epochs; ImageNet 140M / 40 epochs)
 
 Results land under `/mnt/shared/aag/results_scale256/{celebahq,imagenet}/` -- sample grids
@@ -20,7 +32,9 @@ cluster/launch.sh submit cluster/configs/aag256_celebahq.yaml aag1
 cluster/launch.sh submit cluster/configs/aag256_imagenet.yaml aag2
 kubectl -n kubeflow get pytorchjobs | grep aag
 kubectl -n kubeflow logs -f -l training.kubeflow.org/job-name=aag2 --tail=100
-cd /data/tmp/odyssey-main/tools/odytrain && uv run python delete.py --job_name=aag2 --cluster=eks-train-prod-aps3
+kubectl -n kubeflow delete pytorchjob aag2       # delete.py needs a TTY
+# a job stuck in ImagePullBackOff for ~20 min gets Suspended by the scheduler and its pod removed;
+# AAG_IMAGE_TAG=<tag> selects an already-pushed image, AAG_IMAGE_REPO=<repo> the in-region ECR spare
 ```
 Set `AAG_IMAGE_TAG=<tag>` to launch a tag other than the current git hash.
 
