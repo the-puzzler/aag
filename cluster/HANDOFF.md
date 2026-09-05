@@ -321,6 +321,25 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   assignment budget on data-poor sets: held-out pair MSE, per the user's "more transport only
   with enough data" rule.
 
+### 8f. 15:10 UTC -- where the FID gap lives
+
+- Own-AE sweep (`matteo-exp-2`): dimension dominates (d256 0.025/0.281, d128 0.033/0.309,
+  d64 0.043/0.337), 4x4 grid best, width irrelevant. Full pipelines on d128 (`aag6`) and d256
+  (`aag7`) plateaued in the same FID-10k 39-43 band as TiTok (aag3 38.4) -> user pulled them.
+- Pairwise-adversary finetunes (`aag8` TiTok from aag3 ep230; `aag9` d128 from aag6 ep220;
+  gan-weight 0.5 adaptive, lr 1e-4, 100 epochs, ~25 min each): TiTok 38.4 -> **35.0** (ep270;
+  FID-50k **33.7**, best so far), d128 -> 36.8. Held-out MSE unchanged; critic wins early
+  (d ~0.1-0.3) but the flipped-label BCE keeps a live gradient.
+- **z-source decomposition (the key readout):** aag8 ep270 assigned-z FID@5k 8.7 vs fresh-z
+  36.0 vs coordinate-shuffled 36.1; aag9: 9.8 / 38.0 / 37.6. Latent + generator are already
+  in the target regime on assigned z; ALL of the remaining gap is joint structure of z that
+  fresh draws lack. The kNN A->A test saturates before the generator does (d128 A->A 0.516 yet
+  same fresh FID as TiTok at 0.673).
+- Candidates put to the user: z-noise/mixup on the generator; more faces (FFHQ). Nodes: aag2
+  (ImageNet) running; two CelebA nodes idle awaiting the decision.
+- Scripts in the job tmp dir: `zsource_fid_aag8.py` (decomposition), `knn_split.py`,
+  `run_celebahq_ae_pipeline.sh`, `ae_sheet.py`. Configs: `aag256_celebahq_{titok,dcae_d128}_adv.yaml`.
+
 ## 9. What to do next
 
 1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
