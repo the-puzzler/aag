@@ -22,7 +22,7 @@ stages:
   - name: merge
     cmd: python scripts/encode_hf256.py --dataset imagenet256 --merge --world 8 --out $D/imagenet256/particles_dcae_f32c32.pt
   - name: fid_stats
-    cmd: python scripts/compute_fid_stats_hf256.py --dataset imagenet256 --n 50000 --out $D/imagenet256/fid_stats_train_50000.npz
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset imagenet256 --n 0 --out $D/imagenet256/fid_stats_train_full.npz
   - name: assign
     cmd: >-
       python scripts/run_assignment_classes.py --particles $D/imagenet256/particles_dcae_f32c32.pt
@@ -35,4 +35,4 @@ stages:
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $R/imagenet/assign/assign_cls_300k.pt --dataset imagenet256
       --width 1.5 --n-res 3 --epochs 40 --batch 32 --lr 2e-4 --warmup 2000 --val-frac 0.01 --eval-every 2
-      --fid-stats $D/imagenet256/fid_stats_train_50000.npz --fid-n 10000 --log-every 200 --out $R/imagenet/gen_cls_300k
+      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --resume auto --out $R/imagenet/gen_cls_300k

@@ -60,7 +60,7 @@ ap.add_argument("--log-every", type=int, default=200)
 ap.add_argument("--compile", action="store_true")
 ap.add_argument("--no-amp", action="store_true")
 ap.add_argument("--decode-workers", type=int, default=0, help="0 = cpu_count // world_size")
-ap.add_argument("--resume", default=None)
+ap.add_argument("--resume", default=None, help="checkpoint path, or 'auto' = latest gen_ep*.pt under --out")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", type=Path, required=True)
 a = ap.parse_args()
@@ -137,7 +137,19 @@ for p in perceptual.parameters():
     p.requires_grad_(False)
 
 opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.99), weight_decay=a.wd)
-steps_per_epoch = math.ceil(tr_idx.numel() / a.batch)
+# Every rank must run the SAME number of steps per epoch: each backward is an NCCL
+# all-reduce, and the held-out mask removes a Binomial number of rows per shard, so
+# ceil(len(tr_idx)/batch) differs by one across ranks. A rank that leaves the loop
+# early deadlocks the others at their next gradient all-reduce. Use the minimum.
+n_local_steps = math.ceil(tr_idx.numel() / a.batch)
+_cnt = torch.tensor([n_local_steps], device=dev)
+if ddp:
+    _all = [torch.zeros_like(_cnt) for _ in range(world)]
+    dist.all_gather(_all, _cnt)
+    steps_per_epoch = int(min(int(c) for c in _all))
+    log(f"per-rank train batches {[int(c) for c in _all]} -> every rank runs {steps_per_epoch} steps/epoch (the min)")
+else:
+    steps_per_epoch = n_local_steps
 total_steps = steps_per_epoch * a.epochs
 def lr_at(s):
     if s < a.warmup:
@@ -146,6 +158,12 @@ def lr_at(s):
     return a.lr * 0.5 * (1 + math.cos(math.pi * min(1.0, p)))
 start_epoch, gstep = 0, 0
 curve = {"epoch": [], "train_mse": [], "train_lpips": [], "val_mse": [], "val_lpips": [], "fid": []}
+if a.resume == "auto":
+    # latest checkpoint under --out, or a fresh start if there is none: lets a
+    # preempted/relaunched job continue without editing the config
+    _cks = sorted((a.out / "checkpoints").glob("gen_ep*.pt")) if (a.out / "checkpoints").exists() else []
+    a.resume = str(_cks[-1]) if _cks else None
+    log(f"--resume auto -> {a.resume or 'no checkpoint found, starting fresh'}")
 if a.resume:
     R = torch.load(a.resume, map_location=dev, weights_only=False)
     model.load_state_dict(R["model"]); ema.load_state_dict(R["ema"]); opt.load_state_dict(R["opt"])
@@ -217,8 +235,8 @@ for epoch in range(start_epoch, a.epochs):
     model.train()
     perm = tr_idx[torch.randperm(tr_idx.numel(), device=dev)]
     run_mse, run_lp, run_n = 0.0, 0.0, 0
-    for i in range(0, perm.numel(), a.batch):
-        b = perm[i:i + a.batch]
+    for i in range(steps_per_epoch):
+        b = perm[i * a.batch:(i + 1) * a.batch]
         for pg in opt.param_groups:
             pg["lr"] = lr_at(gstep)
         tgt = to_float(x_u8[b])

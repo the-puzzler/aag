@@ -13,8 +13,10 @@ TAG="${AAG_IMAGE_TAG:-$(git -C "$HERE" rev-parse --short HEAD)}"
 IMAGE="$REG:$TAG"
 case "${1:-}" in
 build)
+  # --load then a plain push: buildx's own --push stalled for 45 min with no progress output
   docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
-    -f "$HERE/cluster/Dockerfile" -t "$IMAGE" --push "$HERE"
+    -f "$HERE/cluster/Dockerfile" -t "$IMAGE" --load "$HERE"
+  docker push "$IMAGE"
   echo "pushed $IMAGE" ;;
 submit|dry)
   CFG="$(realpath "$2")"; JOB="$3"
