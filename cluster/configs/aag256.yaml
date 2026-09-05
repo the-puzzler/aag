@@ -1,0 +1,57 @@
+# The whole scale-up on ONE 8xB200 node, GPUs kept busy throughout:
+#   download -> encode both datasets (8-way) -> [ImageNet assignment on GPU 0  ||
+#   CelebA-HQ assignment + generator on GPUs 1-7] -> ImageNet generator on all 8.
+name: aag256
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/celebahq256 $D/imagenet256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16);
+      s('benjamin-paine/imagenet-1k-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/imagenet-1k-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)" &&
+      cp cluster/assets/class_groups.pt $D/imagenet256/ && df -h /mnt/shared
+  - name: encode_celebahq
+    ddp: true
+    cmd: python scripts/encode_hf256.py --dataset celebahq256 --amp --workers 12 --out $D/celebahq256/particles_dcae_f32c32.pt
+  - name: merge_celebahq
+    cmd: python scripts/encode_hf256.py --dataset celebahq256 --merge --world 8 --out $D/celebahq256/particles_dcae_f32c32.pt
+  - name: encode_imagenet
+    ddp: true
+    cmd: python scripts/encode_hf256.py --dataset imagenet256 --amp --workers 12 --out $D/imagenet256/particles_dcae_f32c32.pt
+  - name: merge_imagenet
+    cmd: python scripts/encode_hf256.py --dataset imagenet256 --merge --world 8 --out $D/imagenet256/particles_dcae_f32c32.pt
+  - name: assign_and_celebahq
+    parallel:
+      # GPU 0: ImageNet FID reference stats, then the long class-conditional assignment (rule 1: generous).
+      - name: imagenet_assign
+        gpus: "0"
+        cmd: >-
+          python scripts/compute_fid_stats_hf256.py --dataset imagenet256 --n 50000 --out $D/imagenet256/fid_stats_train_50000.npz &&
+          python scripts/run_assignment_classes.py --particles $D/imagenet256/particles_dcae_f32c32.pt
+          --groups $D/imagenet256/class_groups.pt --levels joint,depth7,depth6,depth5,depth4,living,animal,dog
+          --steps 100000 --grp-per-step 8 --cond-alpha 0.5 --max-group 32768
+          --eval-every 2000 --eval-k 4096 --save-every 10000 --keep-checkpoints
+          --out $R/imagenet/assign/assign_cls_100k.pt
+      # GPUs 1-7: CelebA-HQ FID stats + unconditional assignment once, then its generator on 7 GPUs.
+      - name: celebahq
+        gpus: "1-7"
+        ddp: true
+        cmd: >-
+          cluster/once.sh celebahq_prep bash -c "python scripts/compute_fid_stats_hf256.py --dataset celebahq256 --n 0 --out $D/celebahq256/fid_stats_train_28000.npz &&
+          python scripts/run_assignment_classes.py --particles $D/celebahq256/particles_dcae_f32c32.pt --steps 20000
+          --eval-every 1000 --eval-k 2048 --save-every 5000 --keep-checkpoints --out $R/celebahq/assign/assign_uncond_20k.pt" &&
+          python scripts/train_generator256_ddp.py --assignment $R/celebahq/assign/assign_uncond_20k.pt --dataset celebahq256
+          --n-classes 0 --epochs 400 --batch 32 --lr 2e-4 --warmup 2000 --val-frac 0.02 --eval-every 10
+          --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq/gen_uncond_20k
+  - name: imagenet_generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $R/imagenet/assign/assign_cls_100k.pt --dataset imagenet256
+      --width 1.5 --n-res 3 --epochs 40 --batch 32 --lr 2e-4 --warmup 2000 --val-frac 0.01 --eval-every 2
+      --fid-stats $D/imagenet256/fid_stats_train_50000.npz --fid-n 10000 --log-every 200 --out $R/imagenet/gen_cls_100k

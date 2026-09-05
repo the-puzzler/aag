@@ -249,7 +249,7 @@ for epoch in range(start_epoch, a.epochs):
         fid = fid_fresh(ema) if a.fid_stats else None
         curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid)
         log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}  "
-            f"heldout_mse={vm:.5f} heldout_lpips={vl:.4f}" + (f"  fid{a.fid_n // 1000}k={fid:.2f}" if fid is not None else "")
+            f"heldout_mse={vm:.5f} heldout_lpips={vl:.4f}" + (f"  fid@{a.fid_n}={fid:.2f}" if fid is not None else "")
             + f"  [{(time.time() - t0) / 3600:.2f} h]")
         if is_main:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):

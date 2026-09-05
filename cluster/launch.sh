@@ -7,6 +7,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ODY="${ODYSSEY_MAIN:-/data/tmp/odyssey-main}"          # fresh origin/main worktree: knows aps3
 REG=odydev.azurecr.io/aag
+# odytrain refuses to attribute jobs to a shared account (ubuntu/root); jobs carry odyssey.systems/user=<this>
+export ODYSSEY_USER="${ODYSSEY_USER:-matteopeluso}"
 TAG="${AAG_IMAGE_TAG:-$(git -C "$HERE" rev-parse --short HEAD)}"
 IMAGE="$REG:$TAG"
 case "${1:-}" in

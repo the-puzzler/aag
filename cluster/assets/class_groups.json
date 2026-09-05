@@ -1,0 +1,212 @@
+{
+ "depth4": {
+  "n_groups": 20,
+  "largest": [
+   [
+    "artifact.n.01",
+    517
+   ],
+   [
+    "living_thing.n.01",
+    407
+   ],
+   [
+    "food.n.02",
+    26
+   ],
+   [
+    "food.n.01",
+    18
+   ],
+   [
+    "natural_object.n.01",
+    7
+   ],
+   [
+    "piece.n.01",
+    4
+   ]
+  ],
+  "singletons": 10
+ },
+ "depth5": {
+  "n_groups": 38,
+  "largest": [
+   [
+    "organism.n.01",
+    407
+   ],
+   [
+    "instrumentality.n.03",
+    352
+   ],
+   [
+    "covering.n.02",
+    88
+   ],
+   [
+    "structure.n.01",
+    56
+   ],
+   [
+    "produce.n.01",
+    23
+   ],
+   [
+    "commodity.n.01",
+    12
+   ]
+  ],
+  "singletons": 22
+ },
+ "depth6": {
+  "n_groups": 85,
+  "largest": [
+   [
+    "animal.n.01",
+    398
+   ],
+   [
+    "device.n.01",
+    125
+   ],
+   [
+    "container.n.01",
+    92
+   ],
+   [
+    "clothing.n.01",
+    48
+   ],
+   [
+    "equipment.n.01",
+    36
+   ],
+   [
+    "implement.n.01",
+    36
+   ]
+  ],
+  "singletons": 52
+ },
+ "depth7": {
+  "n_groups": 225,
+  "largest": [
+   [
+    "chordate.n.01",
+    335
+   ],
+   [
+    "invertebrate.n.01",
+    61
+   ],
+   [
+    "wheeled_vehicle.n.01",
+    40
+   ],
+   [
+    "instrument.n.01",
+    27
+   ],
+   [
+    "musical_instrument.n.01",
+    26
+   ],
+   [
+    "garment.n.01",
+    25
+   ]
+  ],
+  "singletons": 149
+ },
+ "depth8": {
+  "n_groups": 375,
+  "largest": [
+   [
+    "vertebrate.n.01",
+    335
+   ],
+   [
+    "arthropod.n.01",
+    47
+   ],
+   [
+    "self-propelled_vehicle.n.01",
+    28
+   ],
+   [
+    "craft.n.02",
+    17
+   ],
+   [
+    "wind_instrument.n.01",
+    12
+   ],
+   [
+    "measuring_instrument.n.01",
+    12
+   ]
+  ],
+  "singletons": 293
+ },
+ "depth9": {
+  "n_groups": 518,
+  "largest": [
+   [
+    "mammal.n.01",
+    216
+   ],
+   [
+    "bird.n.01",
+    59
+   ],
+   [
+    "reptile.n.01",
+    36
+   ],
+   [
+    "insect.n.01",
+    27
+   ],
+   [
+    "motor_vehicle.n.01",
+    21
+   ],
+   [
+    "aquatic_vertebrate.n.01",
+    16
+   ]
+  ],
+  "singletons": 474
+ },
+ "depth10": {
+  "n_groups": 605,
+  "largest": [
+   [
+    "placental.n.01",
+    210
+   ],
+   [
+    "diapsid.n.01",
+    31
+   ],
+   [
+    "aquatic_bird.n.01",
+    24
+   ],
+   [
+    "fish.n.01",
+    16
+   ],
+   [
+    "passerine.n.01",
+    11
+   ],
+   [
+    "car.n.01",
+    10
+   ]
+  ],
+  "singletons": 563
+ }
+}

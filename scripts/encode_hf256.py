@@ -31,12 +31,33 @@ ap.add_argument("--batch", type=int, default=64)
 ap.add_argument("--chunk", type=int, default=16384, help="parquet rows decoded per round")
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--amp", action="store_true", help="bf16 autocast for the encoder")
+ap.add_argument("--rank", type=int, default=int(os.environ.get("RANK", 0)),
+                help="shard index: encode only rows [rank*N/world, (rank+1)*N/world) and write <out>.shard<rank>")
+ap.add_argument("--world", type=int, default=int(os.environ.get("WORLD_SIZE", 1)))
+ap.add_argument("--merge", action="store_true",
+                help="instead of encoding, concatenate <out>.shard0..<world-1> into <out> (rank 0 after a sharded run)")
 ap.add_argument("--out", type=Path, required=True)
 a = ap.parse_args()
 
-dev = "cuda"
+if a.merge:
+    shards = [torch.load(f"{a.out}.shard{r}", map_location="cpu", weights_only=False) for r in range(a.world)]
+    m = dict(shards[0]); m["h"] = torch.cat([s["h"] for s in shards]); m["label"] = torch.cat([s["label"] for s in shards])
+    m["n_particles"] = m["h"].shape[0]
+    assert m["n_particles"] == sum(s["n_particles"] for s in shards)
+    torch.save(m, a.out)
+    for r in range(a.world):
+        os.remove(f"{a.out}.shard{r}")
+    print(f"merged {a.world} shards -> {a.out}  h {tuple(m['h'].shape)}", flush=True)
+    raise SystemExit(0)
+
+dev = f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}" if a.world > 1 else "cuda"
+torch.cuda.set_device(dev)
+
 N_all = manifest(a.root, a.dataset)["offsets"][-1]
-N = min(a.N, N_all) if a.N else N_all
+N_total = min(a.N, N_all) if a.N else N_all
+from aag.hf256 import rank_slice
+lo0, hi0 = rank_slice(N_total, a.rank, a.world)     # this shard's global rows
+N = hi0 - lo0
 
 if a.encoder.endswith(".pt"):
     from aag.ae import AutoEncoder
@@ -54,15 +75,15 @@ else:
     C, grid = z0.shape[1], z0.shape[2]
     encode = lambda x: ae.encode(x).latent.flatten(1)
 D = C * grid * grid
-print(f"encoder {a.encoder}: latent {C}x{grid}x{grid} = {D} dims; encoding {N:,}/{N_all:,} "
-      f"{a.dataset} rows, amp={a.amp}", flush=True)
+print(f"encoder {a.encoder}: latent {C}x{grid}x{grid} = {D} dims; shard {a.rank}/{a.world}: rows [{lo0:,}, {hi0:,}) "
+      f"of {N_total:,} {a.dataset} rows, amp={a.amp}", flush=True)
 
 h = torch.empty(N, D, dtype=torch.float16)
 labels = torch.empty(N, dtype=torch.int64)
 t0 = time.time()
 for lo in range(0, N, a.chunk):
     hi = min(N, lo + a.chunk)
-    x, y = load_uint8(a.root, a.dataset, lo, hi, workers=a.workers, chunk=max(512, a.chunk // (2 * a.workers)))
+    x, y = load_uint8(a.root, a.dataset, lo0 + lo, lo0 + hi, workers=a.workers, chunk=max(512, a.chunk // (2 * a.workers)))
     labels[lo:hi] = y
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.amp):
         for i in range(0, hi - lo, a.batch):
@@ -72,9 +93,10 @@ for lo in range(0, N, a.chunk):
     print(f"  {done:>9,}/{N:,}  {rate:6.0f} img/s  eta {(N - done) / rate / 60:5.1f} min", flush=True)
 
 a.out.parent.mkdir(parents=True, exist_ok=True)
+out_path = Path(f"{a.out}.shard{a.rank}") if a.world > 1 else a.out
 torch.save({"h": h, "label": labels, "encoder": a.encoder, "grid": grid, "latent_channels": C,
-            "dataset": a.dataset, "root": a.root, "n_particles": N,
+            "dataset": a.dataset, "root": a.root, "n_particles": N, "shard": (a.rank, a.world, lo0, hi0),
             "h_stats": {"mean": h.float().mean().item(), "std": h.float().std().item()}},
-           a.out)
-print(f"saved {a.out}  h {tuple(h.shape)} fp16  labels {labels.min().item()}..{labels.max().item()}  "
+           out_path)
+print(f"saved {out_path}  h {tuple(h.shape)} fp16  labels {labels.min().item()}..{labels.max().item()}  "
       f"{time.time() - t0:.0f}s", flush=True)
