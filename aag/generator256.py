@@ -104,8 +104,17 @@ class Generator256(nn.Module):
                  n_classes: int = 0, cond_dim: int = 512, width: float = 1.0,
                  n_res: int = 2, base_channels=(512, 512, 256, 128, 64)):
         super().__init__()
-        assert dim_z % (grid * grid) == 0, "dim_z must be C * grid^2"
-        self.grid, self.cz = grid, dim_z // (grid * grid)
+        # grid=0: z is a FLAT latent with no spatial layout (a 1-D tokenizer such as
+        # TiTok, 32 tokens x 16). Reshaping it to a grid would be arbitrary, so a
+        # learned linear stem lays it out on an 8x8 grid instead; everything after
+        # the stem is unchanged.
+        self.flat = grid == 0
+        if self.flat:
+            grid = 8
+            self.grid, self.cz = grid, max(16, dim_z // (grid * grid))
+        else:
+            assert dim_z % (grid * grid) == 0, "dim_z must be C * grid^2"
+            self.grid, self.cz = grid, dim_z // (grid * grid)
         n_up = (image_size // grid).bit_length() - 1
         assert grid << n_up == image_size, "image_size must be grid * 2^k"
         chans = [max(16, int(c * width)) for c in base_channels[:n_up]]
@@ -117,6 +126,7 @@ class Generator256(nn.Module):
             self.emb = nn.Embedding(n_classes, cond_dim)
             self.cond_mlp = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, cond_dim),
                                           nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+        self.lay = nn.Linear(dim_z, self.cz * grid * grid) if self.flat else None
         self.stem = nn.Conv2d(self.cz, chans[0], 3, 1, 1)
         self.pre = nn.ModuleList([CondResBlock(chans[0], chans[0], cd) for _ in range(n_res)])
         stages, cin = [], chans[0]
@@ -128,6 +138,8 @@ class Generator256(nn.Module):
 
     def forward(self, z: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
         cond = self.cond_mlp(self.emb(y)) if (self.n_classes and y is not None) else None
+        if self.lay is not None:
+            z = self.lay(z)
         h = self.stem(z.view(z.shape[0], self.cz, self.grid, self.grid))
         for r in self.pre:
             h = r(h, cond)

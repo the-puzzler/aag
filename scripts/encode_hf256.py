@@ -67,6 +67,18 @@ if a.encoder.endswith(".pt"):
     ae.load_state_dict(ck["model_state_dict"])
     grid, C = ck.get("grid", 4), ck["latent_dim"] // ck.get("grid", 4) ** 2
     encode = lambda x: ae.enc(x)
+elif a.encoder.startswith("titok:"):
+    # ByteDance TiTok VAE (continuous 1-D tokenizer): 32/64/128 tokens x 16 dims, no spatial grid.
+    # Chosen for CelebA-HQ because independent-N/d matters (METHOD.md s5): 28k/2048 = 14 with
+    # DC-AE, 28k/512 = 55 with TiTok-LL-32 -- at the price of reconstruction (MSE 0.026 vs 0.010).
+    # The posterior MEAN is the latent (deterministic encoder); TiTok takes images in [0, 1].
+    import sys; sys.path.insert(0, os.environ.get("TITOK_REPO", "/data/tmp/1d-tokenizer"))
+    from modeling.titok import TiTok
+    tok = TiTok.from_pretrained(a.encoder[len("titok:"):]).to(dev).eval(); tok.requires_grad_(False)
+    with torch.no_grad():
+        z0 = tok.quantize(tok.encoder(pixel_values=torch.zeros(1, 3, 256, 256, device=dev), latent_tokens=tok.latent_tokens)).mode()
+    C, grid = z0.flatten(1).shape[1], 0        # grid=0: flat latent, the generator uses a learned stem
+    encode = lambda x: tok.quantize(tok.encoder(pixel_values=(x + 1) / 2, latent_tokens=tok.latent_tokens)).mode().flatten(1)
 else:
     from diffusers import AutoencoderDC
     ae = AutoencoderDC.from_pretrained(a.encoder, torch_dtype=torch.float32).to(dev).eval()
@@ -74,7 +86,7 @@ else:
         z0 = ae.encode(torch.zeros(1, 3, DATASETS[a.dataset]["image_size"], DATASETS[a.dataset]["image_size"], device=dev)).latent
     C, grid = z0.shape[1], z0.shape[2]
     encode = lambda x: ae.encode(x).latent.flatten(1)
-D = C * grid * grid
+D = C * grid * grid if grid else C
 print(f"encoder {a.encoder}: latent {C}x{grid}x{grid} = {D} dims; shard {a.rank}/{a.world}: rows [{lo0:,}, {hi0:,}) "
       f"of {N_total:,} {a.dataset} rows, amp={a.amp}", flush=True)
 
