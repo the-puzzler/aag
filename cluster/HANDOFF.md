@@ -283,6 +283,25 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 = 285M, 40 epochs) via the helper pod. ACR docker login expires after a few hours:
 `az acr login -n odydev` then `docker push` if launch.sh build reports "authentication required".
 
+### 8d. State at 11:20 UTC
+
+- `aag5` (CelebA-HQ, 133.6M on the 200k TiTok assignment, image d1ceef4): running, FID-10k 43.3 @ep80
+  vs aag3 43.6 -- capacity alone helps a little; held-out identical to aag3.
+- `aag4` (1M assignment + 133.6M) was STOPPED at ep140 by the user: FID 47 plateau, held-out
+  0.093 vs 0.054. User's reading: more transport is only better with enough data; otherwise it
+  spreads the samples until nowhere is safe to sample. Outputs remain on EFS (`gen_uncond_1m/`).
+- `aag2` (ImageNet, 285M = width 2.2/n_res 3, 300k d=512 assignment, 40 epochs): running; the
+  assignment upload took ~2.5 h via kubectl cp (6.6 GB at <1 MB/s) -- for the next big file use
+  a slimmer artefact (z + labels only) or a bucket.
+- `matteo-exp-2` (third node, user-granted): compact-AE sweep, 8 single-GPU variants, batch 128,
+  lr 1e-3 cosine, 100 epochs, image e074fde. First two submissions failed on my bugs (missing
+  DataLoader import; entry.py failure marker with '/' in nested tags) -- both fixed and tested
+  locally with a one-epoch run (val MSE 0.068 / LPIPS 0.47 after 1 epoch, dcae d128 g4 c128).
+- Local box: ImageNet d=512 assignment continuation 300k -> 1M (`assign_cls_1m*.pt`), the
+  data-rich test of "more transport"; A->A at 300k was 0.606.
+- Target: ROMS-IMLE FID-50k 6.70 (CelebA-HQ @138M) / 2.56 (ImageNet @310M). Best so far:
+  CelebA-HQ FID-50k 37.1 (aag3). `scripts/eval_fid256.py --n 50000` for comparable numbers.
+
 ## 9. What to do next
 
 1. `aag1`: diff the generator banner (per-rank shard sizes, identity check passed, params,
