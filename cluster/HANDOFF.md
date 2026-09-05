@@ -383,3 +383,25 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - Do **not** add a KL term to any AE here — the assignment gaussianises by transport.
 - A `sed` range-delete once silently truncated a script to a stub that exited 0.
   **`wc -l` after any sed edit of a script.**
+
+## 9. Night of 2026-09-05 → 06 (autonomous; user asleep)
+- **Step predictor** (`scripts/toy_step_predictor.py`, `scripts/toy_score_snaps.py`, `scripts/assign_surrogate_score.py`):
+  the 3-s surrogate generator's fresh-z FD (`fd_sur`) predicts the real generator's FID (toy Spearman median ≈0.9 across
+  9 regime cells; real CelebA rank order matches all known FIDs). Objective-floor crossing is the α1 shortcut. Gaussianity/kNN
+  metrics, held-out MSE, locality do not predict. Take the EARLIEST step of the surrogate plateau (fitted generator wants to stop
+  a snapshot earlier). Results: `/data/aag_results/results_scale256/toy_bench/predictor/`, `…/celebahq_titok/assign/surrogate_scores*.json`.
+- **CelebA-TiTok 28k is saturated** ~FID 38–42 for every floor-reaching assignment (4-seed surrogate 39.1–40.1). Validation
+  runs: aag12 α0.3-10k 42.4, aag13 100k 40.6, aag14 α0.1-3k (pred. worst) running, aag15 α1-10k (pred. over-transport),
+  aag16 20k (pred. 72), aag17 α1-3k, aag18 α1-500 (top single pick), aag19 α0.1-10k, aag20 α0.3-5k, aag21 half-width generator.
+- **Dead ends:** z-jitter in generator training (worse at every σ); kNN-distance rejection of fresh z (36.0→36.0–36.4; in 512-d
+  all fresh z are uniformly ~9% farther from data than data from itself — no safe areas).
+- **Lead: hflip pair doubling** (56k pairs, N/d 109): `encode_hf256.py --flip` → `merge_particles.py` → refined α1 1000 steps
+  (`…/celebahq_titok_x2/assign/assign_uncond_x2_refine_a1_2k_step1000.pt`, on EFS as `assign_uncond_x2_refine_a1_best.pt`);
+  surrogate 22.95 vs 39+. Trainer `--aug-hflip` (rows [N,2N) = flipped copies), image `aag:5ccf468`, config
+  `aag256_celebahq_titok_x2.yaml` → **aag23** (200 epochs). Dry-run passed locally. User asked whether flips are allowed for the comparison.
+- **ImageNet:** refined α1 + `--grp-per-step 128` gets all conditional ratios ≈1 by 10k steps (surrogate 3.58 vs 4.41 for 300k random,
+  pairs 2× smoother). Slim (z fp16 + labels) uploads to EFS as `imagenet_titok/assign/assign_cls_refine_a1_g128_best_slim.pt`;
+  `aag256_imagenet_titok_refine_a1_g128.yaml` (133.6M generator) → **aag22**, auto-submits when aag2 finishes (chain_22.sh).
+- Chains live in `/home/ubuntu/.claude/jobs/2153ceba/tmp/chain_v4.sh` (node A: aag14→aag23→aag16→aag18→aag20; node B:
+  aag15→aag17→aag19→aag21) and `chain_22.sh`. AE sweep (matteo-exp-3): ImageNet own d512-g4 0.043/0.351, d1024 0.033/0.288
+  (TiTok 0.056/0.328); CelebA d32 0.057, d16 0.075 (too tight).
