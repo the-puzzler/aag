@@ -29,6 +29,11 @@ DATASETS = {
                         n_classes=1000, image_size=256),
     "celebahq256": dict(hub="korexyz/celeba-hq-256x256", dirname="celeba-hq-256x256",
                         n_classes=2, image_size=256),   # label = female/male; unconditional by default
+    "ffhq256": dict(hub="merkol/ffhq-256", dirname="ffhq-256", n_classes=0, image_size=256),   # no label column
+    # CelebA-HQ train + FFHQ as one 98k-face set (user, 2026-09-05: 28k faces is the limit; the
+    # published CelebA-64 run had 163k). `data/` holds symlinks named so CelebA-HQ sorts first,
+    # then FFHQ -- see scripts/make_faces256.sh. Labels: CelebA-HQ 0/1, FFHQ -1 (unconditional).
+    "faces256": dict(hub=None, dirname="faces-256x256", n_classes=0, image_size=256),
 }
 
 
@@ -70,9 +75,10 @@ def _decode_rows(args):
         n = pf.metadata.row_group(rg).num_rows
         lo, hi = max(a, row0), min(b, row0 + n)
         if lo < hi:
-            t = pf.read_row_group(rg, columns=["image", "label"])
+            cols = ["image"] + (["label"] if "label" in pf.schema_arrow.names else [])
+            t = pf.read_row_group(rg, columns=cols)
             imgs = t.column("image").to_pylist()
-            labs = t.column("label").to_pylist()
+            labs = t.column("label").to_pylist() if "label" in cols else [None] * t.num_rows
             for i in range(lo - row0, hi - row0):
                 im = Image.open(io.BytesIO(imgs[i]["bytes"])).convert("RGB")
                 if im.size != (size, size):
