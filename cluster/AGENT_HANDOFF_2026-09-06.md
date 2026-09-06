@@ -104,7 +104,7 @@ Adversary finetune = same trainer with `--resume <ckpt> --reset-schedule --gan-w
 | aag37 | dino 0.02, plain, best ep160 | 33.3 (34.9 @400) | **32.31** (plain best) |
 | aag38 | dino 0.08, plain | 36.58 final (worse than 0.02) | — |
 | aag36 | aag35 ep140 + adversary w1.0 / 200 ep | 30.29 | **29.16 (valid best)** |
-| aag39 | aag37 ep160 + adversary (queued after aag38) | — | — |
+| aag39 | aag37 ep160 + adversary w1.0 / 200 ep | 31.21 | 29.89 |
 | off-record (x2 flips): aag23 plain 37.77/36.40; aag24–26 adversary 33.6/31.6/29.57 (FID-50k 28.18) | | | |
 
 ImageNet (TiTok-512, class-conditional, hierarchy-level transport, FID-10k vs full-train stats):
