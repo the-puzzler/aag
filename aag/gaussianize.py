@@ -735,7 +735,7 @@ def build_assignment(h: torch.Tensor, cfg: AssignConfig, log=print):
 # AAG2: joint K=d nonorthogonal block transport + matched finite-Gaussian floor
 # (user spec, 2026-09-06). Only the assignment changes; generator unchanged.
 # --------------------------------------------------------------------------- #
-def aag2_block_step(z, *, ridge=0.02, gen, K=None, chunk=None):
+def aag2_block_step(z, *, ridge=0.02, gen, K=None, chunk=None, search=1, search_subset=4096):
     """One joint block: K (=d) random unit directions, all rank targets from the
     same pre-update cloud, one ridge least-squares particle movement.
 
@@ -746,8 +746,16 @@ def aag2_block_step(z, *, ridge=0.02, gen, K=None, chunk=None):
     """
     N, d = z.shape
     K = K or d
-    A = torch.randn(K, d, device=z.device, dtype=z.dtype, generator=gen)
+    A = torch.randn(K * search, d, device=z.device, dtype=z.dtype, generator=gen)
     A = A / A.norm(dim=1, keepdim=True)
+    if search > 1:
+        # hybrid: keep the K worst-projected directions of a K*search random pool (AAG1-style
+        # search, AAG2-style joint solve) -- scored on a subset for speed
+        m = min(search_subset, N)
+        zs = z[torch.randperm(N, device=z.device, generator=gen)[:m]]
+        Ps, _ = torch.sort(zs @ A.T, dim=0)
+        qs = _gaussian_quantiles(m, z.device, z.dtype).unsqueeze(1)
+        A = A[torch.topk(((Ps - qs) ** 2).mean(0), K).indices]
     P = z @ A.T                                              # (N, K)
     q = _gaussian_quantiles(N, z.device, z.dtype)
     order = torch.argsort(P, dim=0)                          # column-wise ranks

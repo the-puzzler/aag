@@ -68,15 +68,15 @@ def run(method):
     m2 = re.match(r"(refine_a[0-9.]+)_(\d+)k$", method)
     if m2: method, steps = m2.group(1), int(m2.group(2)) * 1000
     alpha = {"refine_a0.3": 0.3, "refine_a0.1": 0.1}.get(method, 1.0)
-    m3 = re.match(r"aag2(?:_r([0-9.]+))?_(\d+|floor)$", method)     # aag2_<blocks> | aag2_floor | aag2_r0.1_floor
+    m3 = re.match(r"aag2(?:s(\d+))?(?:_r([0-9.]+))?_(\d+|floor)$", method)   # aag2[s<search>][_r<ridge>]_<blocks|floor>
     if m3:
-        ridge = float(m3.group(1) or 0.02); dirs = _rand_unit(256, d, dev, z.dtype); egen = torch.Generator(device=dev).manual_seed(7)
+        search = int(m3.group(1) or 1); ridge = float(m3.group(2) or 0.02); dirs = _rand_unit(256, d, dev, z.dtype); egen = torch.Generator(device=dev).manual_seed(7)
         floor, _ = aag2_floor(z.shape[0], d, dirs, gen=egen, device=dev); crossed = None
-        nb = 400 if m3.group(2) == "floor" else int(m3.group(2))
+        nb = 400 if m3.group(3) == "floor" else int(m3.group(3))
         for b in range(1, nb + 1):
-            aag2_block_step(z, ridge=ridge, gen=gen)
+            aag2_block_step(z, ridge=ridge, gen=gen, search=search)
             r_ = aag2_defect(z, dirs) / floor
-            if m3.group(2) == "floor" and r_ <= 1.0: crossed = b; break
+            if m3.group(3) == "floor" and r_ <= 1.0: crossed = b; break
         torch.cuda.synchronize(); ta = time.time() - t0
         zg = torch.randn(8192, d, device=dev); aa = c2st(z[torch.randperm(z.shape[0], device=dev)[:8192]], zg)
         r = train_generator(z, x) | {"assign_seconds": round(ta), "z_C2ST_vs_gaussian": aa, "disp": float((z - z0).norm(dim=1).mean() / d ** 0.5), "blocks": crossed or nb, "G_ratio": r_}
