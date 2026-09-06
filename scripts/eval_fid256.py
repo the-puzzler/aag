@@ -31,7 +31,7 @@ dev = "cuda"
 ck = torch.load(a.checkpoint, map_location="cpu", weights_only=False)
 n_classes = int(ck.get("n_classes", 0))
 sd = ck[a.weights]
-dim_z = sd["lay.weight"].shape[1] if "lay.weight" in sd else (sd["dec.fc.weight"].shape[1] if "dec.fc.weight" in sd else sd["stem.weight"].shape[1] * ck["grid"] ** 2)
+dim_z = ck["dim_z"] if "dim_z" in ck else sd["lay.weight"].shape[1] if "lay.weight" in sd else (sd["dec.fc.weight"].shape[1] if "dec.fc.weight" in sd else sd["stem.weight"].shape[1] * ck["grid"] ** 2)
 if ck.get("arch", "grid") == "residual":
     from aag.ae import ResidualDecoder
     class FlatGen(torch.nn.Module):
