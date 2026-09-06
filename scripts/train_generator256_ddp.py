@@ -402,8 +402,11 @@ for epoch in range(start_epoch, a.epochs):
             opt_d.step()
             run_g += g_adv.item() * b.numel(); run_d += d_loss.item() * b.numel(); run_w += float(w) * b.numel()
         if fadv:
+            # ONE critic forward on real||fake: under DDP every forward re-broadcasts the BatchNorm buffers
+            # in place, so two forwards before one backward corrupt the saved tensors of the first
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                d_loss_f = hinge_d_loss(fdisc(tgt).float(), fdisc(pred_f.detach()).float())
+                lg = fdisc(torch.cat([tgt, pred_f.detach()], 0)).float()
+            d_loss_f = hinge_d_loss(lg[: tgt.shape[0]], lg[tgt.shape[0]:])
             opt_fd.zero_grad(set_to_none=True)
             d_loss_f.backward()
             opt_fd.step()
