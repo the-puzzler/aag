@@ -446,3 +446,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   CelebA TiTok: floor crossed at block 28 (3 s), surrogate 37.5 vs 39.4 for AAG1-200k; over-transport degrades with ridge 0.02,
   not with ridge ≥ 0.2; PCA rotation essential. Generator tests: **aag40** (floor, spec) → **aag41** (block 100) chained after aag39
   (`chain_v14.sh`), standard recipe for a like-for-like vs aag3. Assignments on EFS under `celebahq_titok/assign_aag2/`.
+- **09-06 14:20 — AAG2 verdict:** aag40 (AAG2 floor assignment, std recipe) FID-10k 39.7 best / 40.55 final, **FID-50k 38.93** vs
+  aag3 38.4 / 37.13 — equivalent-to-slightly-worse, 7000× cheaper assignment. Toy at CelebA N/d strongly negative (see memory).
+  **New user idea:** fresh-z unpaired adversary (`--fresh-gan-weight`, adaptive 0.1) → **aag42** = finetune of aag37 ep160 (image
+  tag in `fresh_image_tag`), then aag41 (AAG2 block-100 control) via `chain_v15.sh`.
