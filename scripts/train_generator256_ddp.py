@@ -386,7 +386,10 @@ for epoch in range(start_epoch, a.epochs):
             zf = torch.randn(b.numel(), dim_z, device=dev, generator=fresh_gen)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 pred_f = fwd(zf, y[b] if n_classes else None).float().clamp(-1, 1)
-                g_adv_f = g_loss_from(fdisc(pred_f).float())
+                # score fakes inside the same real||fake batch the critic is trained on: the critic has
+                # BatchNorm, so a fake-only batch would be normalised with different statistics and the
+                # generator would receive a critic signal unrelated to the one the critic was trained with
+                g_adv_f = g_loss_from(fdisc(torch.cat([tgt, pred_f], 0)).float()[tgt.shape[0]:])
             wf = torch.tensor(a.fresh_gan_weight, device=dev) if a.fresh_gan_fixed else adaptive_weight(loss, g_adv_f, raw.out.weight) * a.fresh_gan_weight
             total = total + wf * g_adv_f
         total.backward()
