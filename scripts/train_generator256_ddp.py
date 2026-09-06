@@ -78,6 +78,13 @@ ap.add_argument("--ch", type=int, default=128, help="--arch residual: base chann
 # The critic sees real and generated images for the SAME z stacked on the channel axis in a
 # random order and says which side is real (aag.discriminator.paired_*). No AE adversary: a
 # linear probe showed an AE adversary changes only the decoder, which AAG throws away.
+ap.add_argument("--fresh-gan-weight", type=float, default=0.0,
+                help="0 = off; UNPAIRED critic on real images vs G(z) at FRESH z ~ N(0,I) (user idea 2026-09-06): acts only where "
+                     "the pairs give no supervision. Adaptive weight (adversarial grad = this fraction of the supervised grad at "
+                     "the last conv) unless --fresh-gan-fixed; keep it weak relative to the supervised objective.")
+ap.add_argument("--fresh-gan-fixed", action="store_true", help="use --fresh-gan-weight as a fixed multiplier instead of x adaptive")
+ap.add_argument("--fresh-gan-layers", type=int, default=3)
+ap.add_argument("--fresh-gan-ndf", type=int, default=64)
 ap.add_argument("--gan-weight", type=float, default=0.0, help="0 = off; scales the adaptively balanced adversarial term")
 ap.add_argument("--gan-lr", type=float, default=4.5e-5)
 ap.add_argument("--gan-ndf", type=int, default=64)
@@ -205,12 +212,18 @@ dino = DinoFeatures().to(dev) if a.dino_weight > 0 else None
 
 opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.99), weight_decay=a.wd)
 adv = a.gan_weight > 0
-disc = opt_d = None
+fadv = a.fresh_gan_weight > 0
+disc = opt_d = fdisc = opt_fd = None
+if adv or fadv:
+    from aag.discriminator import NLayerDiscriminator, paired_batch, paired_d_loss, paired_g_loss, adaptive_weight, hinge_d_loss, g_loss_from
 if adv:
-    from aag.discriminator import NLayerDiscriminator, paired_batch, paired_d_loss, paired_g_loss, adaptive_weight
     disc = NLayerDiscriminator(6, a.gan_ndf, a.gan_layers).to(dev)
     opt_d = torch.optim.Adam(disc.parameters(), lr=a.gan_lr, betas=(0.5, 0.9))
     pair_gen = torch.Generator(device=dev).manual_seed(4321 + rank)
+if fadv:
+    fdisc = NLayerDiscriminator(3, a.fresh_gan_ndf, a.fresh_gan_layers).to(dev)
+    opt_fd = torch.optim.Adam(fdisc.parameters(), lr=a.gan_lr, betas=(0.5, 0.9))
+    fresh_gen = torch.Generator(device=dev).manual_seed(8765 + rank)
 # Every rank must run the SAME number of steps per epoch: each backward is an NCCL
 # all-reduce, and the held-out mask removes a Binomial number of rows per shard, so
 # ceil(len(tr_idx)/batch) differs by one across ranks. A rank that leaves the loop
@@ -256,6 +269,8 @@ if a.resume:
         opt.load_state_dict(R["opt"])
     if adv and "disc" in R:
         disc.load_state_dict(R["disc"]); opt_d.load_state_dict(R["opt_d"])
+    if fadv and "fdisc" in R:
+        fdisc.load_state_dict(R["fdisc"]); opt_fd.load_state_dict(R["opt_fd"])
     start_epoch, gstep, curve = R["epoch"], R["gstep"], R["curve"]
     log(f"resumed {a.resume}: epoch {start_epoch}, step {gstep:,}, last val_mse {curve['val_mse'][-1] if curve['val_mse'] else None}"
         + (f"; fresh schedule: lr {a.lr}, warmup {a.warmup}, {total_steps:,} steps" if a.reset_schedule else ""))
@@ -264,6 +279,11 @@ if ddp:
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local])
     if adv:
         disc = torch.nn.parallel.DistributedDataParallel(disc, device_ids=[local])
+    if fadv:
+        fdisc = torch.nn.parallel.DistributedDataParallel(fdisc, device_ids=[local])
+if fadv:
+    log(f"fresh-z adversary on: weight={a.fresh_gan_weight} ({'fixed' if a.fresh_gan_fixed else 'x adaptive'}), critic ndf={a.fresh_gan_ndf} "
+        f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; real batch vs G(N(0,I)) batch")
 if adv:
     log(f"pairwise adversary on: weight={a.gan_weight} ({'fixed' if a.gan_fixed else 'x adaptive'}), critic ndf={a.gan_ndf} "
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
@@ -333,6 +353,7 @@ for epoch in range(start_epoch, a.epochs):
     run_mse, run_lp, run_n = 0.0, 0.0, 0
     run_dn = 0.0
     run_g = run_d = run_w = 0.0
+    run_gf = run_df = run_wf = 0.0
     for i in range(steps_per_epoch):
         b = perm[i * a.batch:(i + 1) * a.batch]
         for pg in opt.param_groups:
@@ -350,6 +371,7 @@ for epoch in range(start_epoch, a.epochs):
             dn = torch.zeros((), device=dev)
         loss = a.mse_weight * mse + a.lpips_weight * perc + a.dino_weight * dn
         opt.zero_grad(set_to_none=True)
+        total = loss
         if adv:
             # generator step: fool the pair critic; the adaptive weight measures the adversarial
             # gradient against the reconstruction gradient at the generator's last conv
@@ -357,9 +379,17 @@ for epoch in range(start_epoch, a.epochs):
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 g_adv = paired_g_loss(disc(pair).float(), lab)
             w = torch.tensor(a.gan_weight, device=dev) if a.gan_fixed else adaptive_weight(loss, g_adv, raw.out.weight) * a.gan_weight
-            (loss + w * g_adv).backward()
-        else:
-            loss.backward()
+            total = total + w * g_adv
+        if fadv:
+            # fresh-z term: samples from N(0,I) (labels drawn from the batch when conditional) judged by an
+            # unpaired critic against the real batch -- supervision exactly where the pairs give none
+            zf = torch.randn(b.numel(), dim_z, device=dev, generator=fresh_gen)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                pred_f = fwd(zf, y[b] if n_classes else None).float().clamp(-1, 1)
+                g_adv_f = g_loss_from(fdisc(pred_f).float())
+            wf = torch.tensor(a.fresh_gan_weight, device=dev) if a.fresh_gan_fixed else adaptive_weight(loss, g_adv_f, raw.out.weight) * a.fresh_gan_weight
+            total = total + wf * g_adv_f
+        total.backward()
         torch.nn.utils.clip_grad_norm_(raw.parameters(), a.grad_clip)
         opt.step()
         if adv:
@@ -371,6 +401,13 @@ for epoch in range(start_epoch, a.epochs):
             d_loss.backward()
             opt_d.step()
             run_g += g_adv.item() * b.numel(); run_d += d_loss.item() * b.numel(); run_w += float(w) * b.numel()
+        if fadv:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                d_loss_f = hinge_d_loss(fdisc(tgt).float(), fdisc(pred_f.detach()).float())
+            opt_fd.zero_grad(set_to_none=True)
+            d_loss_f.backward()
+            opt_fd.step()
+            run_gf += g_adv_f.item() * b.numel(); run_df += d_loss_f.item() * b.numel(); run_wf += float(wf) * b.numel()
         with torch.no_grad():
             for pe, pm in zip(ema.parameters(), raw.parameters()):
                 pe.lerp_(pm, 1 - a.ema)
@@ -379,7 +416,8 @@ for epoch in range(start_epoch, a.epochs):
         if is_main and gstep % a.log_every == 0:
             el = time.time() - t0
             print(f"  ep {epoch + 1} step {gstep - sched0:,}/{total_steps:,}  mse {run_mse / run_n:.5f}  lpips {run_lp / run_n:.4f}  "
-                  + (f"g {run_g / run_n:.3f} d {run_d / run_n:.3f} w {run_w / run_n:.3g}  " if adv else "") +
+                  + (f"g {run_g / run_n:.3f} d {run_d / run_n:.3f} w {run_w / run_n:.3g}  " if adv else "")
+                  + (f"gf {run_gf / run_n:.3f} df {run_df / run_n:.3f} wf {run_wf / run_n:.3g}  " if fadv else "") +
                   f"lr {lr_at(gstep):.2e}  {(gstep - gstep_run0) * a.batch * world / el:,.0f} img/s  "
                   f"eta {(total_steps - (gstep - sched0)) * el / max(gstep - gstep_run0, 1) / 3600:.1f} h",
                   flush=True)
@@ -404,6 +442,7 @@ for epoch in range(start_epoch, a.epochs):
             ck = a.out / "checkpoints" / f"gen_ep{epoch + 1:03d}.pt"
             torch.save({"model": raw.state_dict(), "ema": ema.state_dict(), "opt": opt.state_dict(),
                         **({"disc": (disc.module if ddp else disc).state_dict(), "opt_d": opt_d.state_dict()} if adv else {}),
+                        **({"fdisc": (fdisc.module if ddp else fdisc).state_dict(), "opt_fd": opt_fd.state_dict()} if fadv else {}),
                         "epoch": epoch + 1, "gstep": gstep, "curve": curve, "args": vars(a), "dim_z": dim_z,
                         "grid": grid, "n_classes": n_classes, "width": a.width, "n_res": a.n_res,
                         "cond_dim": a.cond_dim, "assignment": a.assignment, "arch": a.arch, "ch": a.ch}, str(ck) + ".tmp")
