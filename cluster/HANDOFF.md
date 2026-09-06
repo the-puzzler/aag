@@ -463,3 +463,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   drift (flat aag37: min 33.3, 34.9 final); **FID-50k 30.56** = plain record. Held-out pixel MSE much worse (0.10 vs 0.057) — the
   hypothesised trade. aag49–52 (skips, rank 16) follow. User rule: do NOT stack bottleneck with adversary (confounded).
   Fresh-z adversary: aag46 (lr 3e-5) null; aag47 (fresh+pairwise) diverging (89 @310); aag53 (20 ep at 1e-4) next.
+- **09-06 20:25 — fresh-z recipe settled:** aag53 (flat dino-0.02 gen + fresh critic 0.5, lr 1e-4, 20-ep cosine, ckpt @ep172)
+  FID-10k 28.58 / **FID-50k 27.45 = valid CelebA best**. aag46 (lr 3e-5) null, aag47 (fresh+pairwise) collapsed to 152, aag44 (200 ep)
+  collapsed to 85 after its ep170 minimum. Bottleneck sweep continues on the third node (aag49 running). aag41 (AAG2 control) on node B.
