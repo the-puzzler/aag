@@ -459,3 +459,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   `--z-bottleneck/--z-skip/--z-skip-rank`. Sweep aag48–52 (bott64, +lowrank8, +full, bott16, bott16+lowrank8) on the third node
   after aag45, DINO-0.02 recipe, vs flat aag37 (33.3 / 32.31). `chain_v20.sh`, tag `route_image_tag`. Fresh-z adversary: control
   aag45 flat at 33.5–33.9 → the aag42/aag44 rises are adversarial instability; aag46 (short low-LR) and aag47 (fresh+pairwise) queued.
+- **09-06 20:00 — z-routing first result:** aag48 (rank-64 bottleneck, plain, DINO-0.02) FID-10k 31.5 final with NO post-plateau
+  drift (flat aag37: min 33.3, 34.9 final); **FID-50k 30.56** = plain record. Held-out pixel MSE much worse (0.10 vs 0.057) — the
+  hypothesised trade. aag49–52 (skips, rank 16) follow. User rule: do NOT stack bottleneck with adversary (confounded).
+  Fresh-z adversary: aag46 (lr 3e-5) null; aag47 (fresh+pairwise) diverging (89 @310); aag53 (20 ep at 1e-4) next.
