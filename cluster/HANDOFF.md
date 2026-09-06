@@ -424,3 +424,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   recipe, image tag in `dino_image_tag`) → aag28 (w0.5 adversary) → aag31 (DINO recipe + adversary). Node A: `wait29.sh` submits
   aag29 (3M assignment) when `assign_cls_3m_slim.pt` lands on EFS. aag22 epoch 4: 146.8 vs aag2 152.0. Compact AEs (d64/128/256)
   were a wash: FID 39.4/39.7/43.1 vs TiTok 38.4 — better N/d paid for by the decoder floor.
+- **09-06 08:xx — flips REJECTED by the user** ("gain too small to warrant flipping"): aag27/28/30/31 (x2 line) cancelled, aag26's
+  28.18 is off the record; valid CelebA best stays aag8 33.7 until the 28k re-runs land. Submitted: **aag33** = adversary w1.0/200 ep
+  on aag3 ep400 (node A; aag29 queues behind it), **aag32** = DINO recipe on 28k from scratch (node B, image 7bba9c8) → aag34 its
+  adversary (`chain_v10.sh`). Configs `aag256_celebahq_titok_{dino,adv_w1_long,dino_adv_w1_long}.yaml`.
