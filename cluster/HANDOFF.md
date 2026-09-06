@@ -450,3 +450,8 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   aag3 38.4 / 37.13 — equivalent-to-slightly-worse, 7000× cheaper assignment. Toy at CelebA N/d strongly negative (see memory).
   **New user idea:** fresh-z unpaired adversary (`--fresh-gan-weight`, adaptive 0.1) → **aag42** = finetune of aag37 ep160 (image
   tag in `fresh_image_tag`), then aag41 (AAG2 block-100 control) via `chain_v15.sh`.
+- **09-06 17:00 — fresh-z adversary (user idea 2):** `--fresh-gan-weight` (unpaired critic real vs G(N(0,I)); two BatchNorm bugs
+  fixed: single real||fake forward for DDP, fakes scored inside the mixed batch). Weight 0.1 → critic saturates, FID 33→57 (aag42).
+  Weight 0.5 (aag44): **FID-10k 28.8 @ +10 epochs, FID-50k 27.71 (valid best)**, then drifts up at the reset LR (38 @ep210).
+  Queued (`chain_v19.sh`): aag46 = short low-LR fresh finetune (30 ep, 3e-5), aag47 = fresh 0.5 + pairwise 1.0, aag41 (AAG2
+  control); aag45 = no-adversary finetune control after aag22. Image tag `84229c6`.
