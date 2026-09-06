@@ -729,3 +729,59 @@ def build_assignment(h: torch.Tensor, cfg: AssignConfig, log=print):
             log(f"  [assign] step {step:4d}/{cfg.steps}  max_proj_W2={s:.4f}")
             hist.append((step, s))
     return {"z": z, "mean": mean, "W": W, "W_inv": W_inv, "hist": hist}
+
+
+# --------------------------------------------------------------------------- #
+# AAG2: joint K=d nonorthogonal block transport + matched finite-Gaussian floor
+# (user spec, 2026-09-06). Only the assignment changes; generator unchanged.
+# --------------------------------------------------------------------------- #
+def aag2_block_step(z, *, ridge=0.02, gen, K=None, chunk=None):
+    """One joint block: K (=d) random unit directions, all rank targets from the
+    same pre-update cloud, one ridge least-squares particle movement.
+
+        P = Z A^T,  D = Q(rank(P)) - P,  dZ = D A (A^T A + ridge I)^{-1}
+
+    Returns the mean squared requested correction (||D||^2 / (N K)) as a cheap
+    progress readout; the stopping rule uses aag2_defect() on frozen directions.
+    """
+    N, d = z.shape
+    K = K or d
+    A = torch.randn(K, d, device=z.device, dtype=z.dtype, generator=gen)
+    A = A / A.norm(dim=1, keepdim=True)
+    P = z @ A.T                                              # (N, K)
+    q = _gaussian_quantiles(N, z.device, z.dtype)
+    order = torch.argsort(P, dim=0)                          # column-wise ranks
+    Q = torch.empty_like(P)
+    Q.scatter_(0, order, q.unsqueeze(1).expand(N, K))        # Q[order[r,j], j] = q[r]
+    D = Q - P
+    M = A.T @ A + ridge * torch.eye(d, device=z.device, dtype=z.dtype)   # (d, d)
+    # dZ = (D A) M^{-1}  ->  solve M^T X^T = (D A)^T ; M symmetric
+    DA = D @ A                                               # (N, d)
+    dZ = torch.linalg.solve(M, DA.T).T
+    z.add_(dZ)
+    return float((D * D).mean())
+
+
+def aag2_defect(z, dirs, *, subset=None, gen=None):
+    """G(Z) = mean over frozen directions of W2^2(a^T Z, N(0,1)) via sorted
+    projections vs Gaussian order statistics. `subset` evaluates on a random
+    subset of particles (the floor must then use the same subset size)."""
+    zs = z
+    if subset is not None and subset < z.shape[0]:
+        idx = torch.randperm(z.shape[0], device=z.device, generator=gen)[:subset]
+        zs = z[idx]
+    m = zs.shape[0]
+    P, _ = torch.sort(zs @ dirs.T, dim=0)
+    q = _gaussian_quantiles(m, z.device, z.dtype).unsqueeze(1)
+    return float(((P - q) ** 2).mean())
+
+
+def aag2_floor(N, d, dirs, *, n_clouds=4, subset=None, gen=None, device="cuda", dtype=torch.float32):
+    """Matched finite-sample floor: the same defect on iid N(0, I_d) clouds of the
+    same N (evaluated on the same subset size and the same frozen directions)."""
+    vals = []
+    for _ in range(n_clouds):
+        zg = torch.randn(N, d, device=device, dtype=dtype, generator=gen)
+        vals.append(aag2_defect(zg, dirs, subset=subset, gen=gen))
+    t = torch.tensor(vals)
+    return float(t.mean()), float(t.std())
