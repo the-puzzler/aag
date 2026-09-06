@@ -466,3 +466,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-06 20:25 — fresh-z recipe settled:** aag53 (flat dino-0.02 gen + fresh critic 0.5, lr 1e-4, 20-ep cosine, ckpt @ep172)
   FID-10k 28.58 / **FID-50k 27.45 = valid CelebA best**. aag46 (lr 3e-5) null, aag47 (fresh+pairwise) collapsed to 152, aag44 (200 ep)
   collapsed to 85 after its ep170 minimum. Bottleneck sweep continues on the third node (aag49 running). aag41 (AAG2 control) on node B.
+- **09-06 21:40:** aag29 (ImageNet 3M assignment, 150M) final FID-10k **131.9** (300k→2M→3M: 138.3→133.6→131.9). **aag57** =
+  same + DINO-0.02 recipe on node A (~17 h). aag49 (bott64 + lowrank-8 skips) FID-50k 31.57 — skips erode the bottleneck gain
+  (30.56); aag50 (full skips) running. Fresh-weight bracket aag54–56 queued after aag41 on node B.
