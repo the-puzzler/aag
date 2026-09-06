@@ -434,3 +434,8 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-06 08:00:** aag33 (28k adversary w1.0/200ep on aag3) final FID-10k **34.43** (FID-50k running). **aag35** (grad-matched DINO,
   plain) 34.3 @ep120/400 and falling — the DINO term at 0.005 is the biggest plain-generator lever found; aag36 (its adversary)
   chained. **aag37** = dino 0.02 bracket on node A while the 3M ImageNet assignment finishes (~09:20) → aag29 queues behind it.
+- **09-06 09:20:** DINO recipe results (28k, plain, best checkpoint): dino 0.005 (aag35) FID-10k 34.2 / **FID-50k 33.02** @ep140;
+  dino 0.02 (aag37) 33.3 / **FID-50k 32.31** @ep160 — plain generators now beat every adversary run (aag33 33.16, aag8 33.72).
+  Both drift up after the plateau (36.5 / ~34.3 at ep400) → adversary finetunes resume from the BEST checkpoint: aag36 (from
+  aag35 ep140, running), aag39 (from aag37 ep160, chained after aag38 = dino 0.08 bracket). Scratch checkpoints moved to
+  `/opt/dlami/nvme/aag_scratch/ckpts` (user: use the large drives; root disk was at 84%).
