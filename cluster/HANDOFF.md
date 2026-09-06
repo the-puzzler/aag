@@ -413,3 +413,8 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   (300k/refined/1M) with fresh FID 134/142/121 — more transport helps there; z→class MLP probe 13–15% (chance 0.1%) and
   class-focused transport cannot remove it. Running locally: `assign_cls_3m.pt` (1M→3M random). `imagenet_2m_pipeline.sh`
   swaps the 2M slim assignment onto EFS and raises `go22`; `chain_22_v2.sh` submits aag22 after aag2 + go22 (90-min deadline).
+- **Morning 09-06:** aag26 (x2, adversary w1.0, 200 ep) FID-10k **29.57** (best). Validation queue done: α1-500 39.0, α0.1-10k 40.2,
+  α0.3-5k 41.6, α1-3k 45.3, 20k 49.0; half-width on 200k (aag21) **37.8 < 38.4** full width. ImageNet fresh-z latent FID falls with
+  transport (300k 134 → 2M 110); aag2 final 138.3; **aag22** (150M — width 1.9 + class embedding, not 133.6M; 2M assignment) running,
+  epoch 2 = 161.6 vs aag2 165.2. 3M assignment finishing locally → `imagenet_3m_pipeline.sh` uploads `assign_cls_3m_slim.pt` → aag29.
+  Node B: aag27 (x2 plain, width 0.5) → aag28 (its adversary w1.0 200 ep). Chains: `chain_v8.sh`.
