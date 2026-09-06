@@ -159,6 +159,34 @@ z\sim\mathcal N(0,I_d),\qquad x=G_\theta(z\oplus c).
 
 No change to the generator architecture or inference procedure is required.
 
+## Experimental extension: police off-anchor gaps
+
+The core AAG2 assignment still gives one target only at each persistent anchor:
+
+\[
+G_\theta(z_i\oplus c_i)\rightarrow x_i.
+\]
+
+In sparse latent regimes, this can leave most fresh Gaussian inputs far from any supervised anchor. An optional extension draws a separate batch `z_f ~ N(0,I)` during generator training and applies a distribution-only adversarial loss to `G(z_f)`, without assigning any individual `z_f` to a training example.
+
+Keep this loss subordinate by controlling its generator-gradient norm rather than using a fixed loss coefficient:
+
+\[
+L_G=L_{\mathrm{pair}}+\lambda_tL_{\mathrm{adv}},
+\qquad
+\lambda_t=\rho
+\frac{\|\nabla_\theta L_{\mathrm{pair}}\|_2}
+{\|\nabla_\theta L_{\mathrm{adv}}\|_2+\epsilon}.
+\]
+
+The current experimental range is `ρ ∈ {0.05, 0.10, 0.20}`, starting at `ρ=0.10`. Recompute the coefficient every update and do not impose a positive minimum: if the paired gradient vanishes, the adversarial gradient must not become the primary signal by accident.
+
+Across two synthetic targets and six `N,d` settings, the best tested ratio in this range beat paired-only AAG2 in all three matched seeds per setting. Improvements ranged from 7% to 92% in held-out sliced-\(W_2^2\). On the sparse 64-D tests, the eight-mode target improved 9% and the connected banana improved 28% at `ρ=0.20`. GAN-only training was highly unstable on both sparse 64-D targets. A 50% gradient target catastrophically failed on one banana seed.
+
+This supports the mechanism—pairing specifies correspondence while a weak distributional loss constrains the extension between anchors—but not a universal sample-count rule. The auxiliary loss also helped in 8-D and sometimes with 512 or 2,048 examples. Its value depends on off-anchor coverage, target geometry, assignment complexity and model capacity, not dimension or dataset size alone.
+
+For now this is an **experimental option, not part of the default AAG2 recipe**. It changes generator training, adds discriminator compute, and has only synthetic evidence. Default inclusion requires fixed-budget FID/KID tests on real encoder particles and comparison with non-adversarial alternatives such as MMD or sliced-Wasserstein regularization. Inference remains a single generator pass.
+
 ## Reference pseudocode
 
 ```python
@@ -277,6 +305,7 @@ This extension has not yet been validated. In particular, small conditional grou
 3. **The evidence is synthetic.** The next decisive test is AAG1 versus AAG2 on real encoder particles, using identical generator models and training budgets and evaluating FID/KID over several seeds.
 4. **The floor estimate must match the diagnostic exactly.** It must use the same `N`, `d`, number of evaluation directions, projection statistic, and candidate-selection protocol where applicable.
 5. **AAG2 does not remove sparse-prior coverage.** It improves how the finite assignment is constructed. If fresh Gaussian samples remain far from all particles relative to the target's variation scale, additional data, lower effective dimension, stronger conditioning, or off-particle teacher supervision is still required.
+6. **The gap-policing adversary is not yet a default component.** It improved every tested synthetic scenario at a selected 5–20% gradient ratio, but the ratio was selected on the same seeds used for evaluation and adversarial training adds instability and compute. Real-data confirmation is still required.
 
 ## Current recommended configuration
 
@@ -289,4 +318,5 @@ ridge:                0.02 in the current synthetic experiments
 floor evaluation:     frozen held-out directions
 stopping:             first defect/floor crossing at or below 1
 generator selection:  fixed-budget downstream score over multiple seeds
+optional experiment:   fresh-z adversary at 5–20% of paired gradient norm
 ```
