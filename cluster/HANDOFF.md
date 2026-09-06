@@ -442,3 +442,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-06 10:00:** **aag36 FID-50k 29.16** (valid best: 28k, 38M, DINO-0.005 generator ep140 + adversary w1.0/200 ep). Node B → aag38
   (dino 0.08 bracket) → aag39 (adversary on aag37 ep160, dino 0.02). Node A: aag29 (ImageNet 3M assignment, 150M) running;
   aag22 (2M) at epoch 14: 141.3. 3M assignment diagnostics: fresh latent FID 102.8, critic 56%.
+- **09-06 12:30 — AAG2 (user's new idea, see memory `newgen_aag2_joint_block`):** implemented (`aag2_block_step`, `run_assignment_aag2.py`).
+  CelebA TiTok: floor crossed at block 28 (3 s), surrogate 37.5 vs 39.4 for AAG1-200k; over-transport degrades with ridge 0.02,
+  not with ridge ≥ 0.2; PCA rotation essential. Generator tests: **aag40** (floor, spec) → **aag41** (block 100) chained after aag39
+  (`chain_v14.sh`), standard recipe for a like-for-like vs aag3. Assignments on EFS under `celebahq_titok/assign_aag2/`.
