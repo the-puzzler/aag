@@ -46,6 +46,9 @@ ap.add_argument("--aug-hflip", action="store_true",
                 help="assignment rows [n_img, 2 n_img) are the horizontally flipped copies of rows [0, n_img) "
                      "(particles from encode_hf256.py --flip, merged by merge_particles.py)")
 ap.add_argument("--n-res", type=int, default=2)
+ap.add_argument("--z-bottleneck", type=int, default=0, help="flat z: hard rank-r linear bottleneck before the 8x8 stem (0 = off)")
+ap.add_argument("--z-skip", choices=["none", "full", "lowrank"], default="none", help="z bypass into every up-stage: none | full (unrestricted, gate init 1) | lowrank (shared rank-k, gate init 0.1)")
+ap.add_argument("--z-skip-rank", type=int, default=32)
 ap.add_argument("--cond-dim", type=int, default=512)
 ap.add_argument("--epochs", type=int, default=40)
 ap.add_argument("--batch", type=int, default=32, help="per GPU")
@@ -176,7 +179,8 @@ if a.arch == "residual":
     make = lambda: FlatGen().to(dev)
 else:
     make = lambda: Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
-                                cond_dim=a.cond_dim, width=a.width, n_res=a.n_res).to(dev)
+                                cond_dim=a.cond_dim, width=a.width, n_res=a.n_res,
+                                z_bottleneck=a.z_bottleneck, z_skip=a.z_skip, z_skip_rank=a.z_skip_rank).to(dev)
 model = make()
 n_params = sum(p.numel() for p in model.parameters())
 ema = make().eval()
@@ -289,7 +293,8 @@ if adv:
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
 fwd = torch.compile(model) if a.compile else model
 
-log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''} width={a.width} n_res={a.n_res}  batch {a.batch}x{world}={a.batch * world}  "
+log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''} width={a.width} n_res={a.n_res}"
+    f"{' z_bottleneck=' + str(a.z_bottleneck) if a.z_bottleneck else ''}{' z_skip=' + a.z_skip + ('/k' + str(a.z_skip_rank) if a.z_skip == 'lowrank' else '') if a.z_skip != 'none' else ''}  batch {a.batch}x{world}={a.batch * world}  "
     f"{steps_per_epoch:,} steps/epoch x {a.epochs} epochs  lr {a.lr} warmup {a.warmup}  ema {a.ema}")
 log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  mse_weight {a.mse_weight}  lpips_weight {a.lpips_weight}  dino_weight {a.dino_weight}  "
     f"fid: {'every eval, n=' + str(a.fid_n) + ' vs ' + a.fid_stats if a.fid_stats else 'off'}")
@@ -433,7 +438,8 @@ for epoch in range(start_epoch, a.epochs):
         vm, vl = evaluate(ema)
         fid = fid_fresh(ema) if a.fid_stats else None
         curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid)
-        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + "  "
+        gates = f"  gates={[round(float(g), 3) for g in raw.skip_gate]}" if getattr(raw, "z_skip", "none") != "none" else ""
+        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + gates + "  "
             f"heldout_mse={vm:.5f} heldout_lpips={vl:.4f}" + (f"  fid@{a.fid_n}={fid:.2f}" if fid is not None else "")
             + f"  [{(time.time() - t0) / 3600:.2f} h]")
         if is_main:
@@ -451,7 +457,8 @@ for epoch in range(start_epoch, a.epochs):
                         **({"fdisc": (fdisc.module if ddp else fdisc).state_dict(), "opt_fd": opt_fd.state_dict()} if fadv else {}),
                         "epoch": epoch + 1, "gstep": gstep, "curve": curve, "args": vars(a), "dim_z": dim_z,
                         "grid": grid, "n_classes": n_classes, "width": a.width, "n_res": a.n_res,
-                        "cond_dim": a.cond_dim, "assignment": a.assignment, "arch": a.arch, "ch": a.ch}, str(ck) + ".tmp")
+                        "cond_dim": a.cond_dim, "assignment": a.assignment, "arch": a.arch, "ch": a.ch,
+                        "z_bottleneck": a.z_bottleneck, "z_skip": a.z_skip, "z_skip_rank": a.z_skip_rank}, str(ck) + ".tmp")
             Path(str(ck) + ".tmp").replace(ck)
             (a.out / "curve.json").write_text(json.dumps(curve, indent=1))
     else:

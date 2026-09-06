@@ -102,7 +102,16 @@ class Generator256(nn.Module):
 
     def __init__(self, dim_z: int, grid: int = 8, image_size: int = 256,
                  n_classes: int = 0, cond_dim: int = 512, width: float = 1.0,
-                 n_res: int = 2, base_channels=(512, 512, 256, 128, 64)):
+                 n_res: int = 2, base_channels=(512, 512, 256, 128, 64),
+                 z_bottleneck: int = 0, z_skip: str = "none", z_skip_rank: int = 32):
+        """Routing experiment (user's research agent, 2026-09-06), flat-z only:
+        z_bottleneck=r>0  -- hard rank-r linear bottleneck z(D) -> r -> 8x8 grid: the trunk sees only an
+                             r-dimensional projection of z (interpolation problem reduced to r dims)
+        z_skip="full"     -- the ORIGINAL z bypasses the bottleneck into every up-stage (unrestricted linear
+                             map to the stage channels, broadcast spatially, learned scalar gate init 1)
+        z_skip="lowrank"  -- same bypass but through one shared rank-k projection (z_skip_rank) and a
+                             learned scalar gate per stage initialised at 0.1
+        """
         super().__init__()
         # grid=0: z is a FLAT latent with no spatial layout (a 1-D tokenizer such as
         # TiTok, 32 tokens x 16). Reshaping it to a grid would be arbitrary, so a
@@ -127,7 +136,20 @@ class Generator256(nn.Module):
             self.emb = nn.Embedding(n_classes, cond_dim)
             self.cond_mlp = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, cond_dim),
                                           nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        self.lay = nn.Linear(dim_z, self.cz * grid * grid) if self.flat else None
+        self.z_bottleneck, self.z_skip = z_bottleneck, z_skip
+        if self.flat and z_bottleneck > 0:
+            self.bott = nn.Linear(dim_z, z_bottleneck)
+            self.lay = nn.Linear(z_bottleneck, self.cz * grid * grid)
+        else:
+            self.bott = None
+            self.lay = nn.Linear(dim_z, self.cz * grid * grid) if self.flat else None
+        if z_skip != "none":
+            k = dim_z if z_skip == "full" else z_skip_rank
+            self.skip_in = None if z_skip == "full" else nn.Linear(dim_z, k, bias=False)
+            self.skip_proj = nn.ModuleList([nn.Linear(k, c) for c in chans])
+            self.skip_gate = nn.Parameter(torch.full((len(chans),), 1.0 if z_skip == "full" else 0.1))
+            for m in self.skip_proj:
+                nn.init.zeros_(m.bias)
         self.stem = nn.Conv2d(self.cz, chans[0], 3, 1, 1)
         self.pre = nn.ModuleList([CondResBlock(chans[0], chans[0], cd) for _ in range(n_res)])
         stages, cin = [], chans[0]
@@ -139,11 +161,17 @@ class Generator256(nn.Module):
 
     def forward(self, z: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
         cond = self.cond_mlp(self.emb(y)) if (self.n_classes and y is not None) else None
+        z_full = z
+        if self.bott is not None:
+            z = self.bott(z)
         if self.lay is not None:
             z = self.lay(z)
         h = self.stem(z.view(z.shape[0], self.cz, self.grid, self.grid))
         for r in self.pre:
             h = r(h, cond)
-        for s in self.stages:
+        zk = None if self.z_skip == "none" else (z_full if self.skip_in is None else self.skip_in(z_full))
+        for i, s in enumerate(self.stages):
             h = s(h, cond)
+            if zk is not None:
+                h = h + self.skip_gate[i] * self.skip_proj[i](zk)[:, :, None, None]
         return torch.tanh(self.out(F.silu(self.out_norm(h, cond))))

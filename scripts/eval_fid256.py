@@ -41,7 +41,8 @@ if ck.get("arch", "grid") == "residual":
     dim_z = sd["dec.fc.weight"].shape[1]; net = FlatGen().to(dev).eval()
 else:
     net = Generator256(dim_z, grid=ck["grid"], image_size=256, n_classes=n_classes, cond_dim=ck["cond_dim"],
-                       width=ck["width"], n_res=ck["n_res"]).to(dev).eval()
+                       width=ck["width"], n_res=ck["n_res"], z_bottleneck=ck.get("z_bottleneck", 0),
+                       z_skip=ck.get("z_skip", "none"), z_skip_rank=ck.get("z_skip_rank", 32)).to(dev).eval()
 net.load_state_dict(sd)
 ref = np.load(a.fid_stats); mu, sig = ref["mu"], ref["sigma"]
 g = torch.Generator(device=dev).manual_seed(a.seed)
