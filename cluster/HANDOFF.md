@@ -469,3 +469,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-06 21:40:** aag29 (ImageNet 3M assignment, 150M) final FID-10k **131.9** (300k→2M→3M: 138.3→133.6→131.9). **aag57** =
   same + DINO-0.02 recipe on node A (~17 h). aag49 (bott64 + lowrank-8 skips) FID-50k 31.57 — skips erode the bottleneck gain
   (30.56); aag50 (full skips) running. Fresh-weight bracket aag54–56 queued after aag41 on node B.
+- **09-06 22:40:** fresh-z short recipe: weight bracket 0.25 → 32.6, **0.5 → 28.6 (seed 2: 28.9)**, 1.0 → 31.9 then unstable; on the
+  standard-recipe generator (aag58) no gain (39.1) — needs the DINO base. aag41 (AAG2 block-100) 39.7 best = same as floor ckpt.
+  ImageNet aag57 (3M + DINO-0.02): FID-10k **113.4 @ epoch 2** (std recipe 166 @2, 132 final). Node B idle; third node on aag50–52.
