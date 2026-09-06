@@ -431,3 +431,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-06 07:40:** literal ROMS-IMLE weights (0.1/1/1) don't train (FID 404↑; DINO output-grad 1.30 vs LPIPS 0.0061 vs MSE 0.0001 →
   DINO-only loss; `grad_balance.py`). User chose (a): aag32 deleted → **aag35** = gradient-matched mse 1 / lpips 0.5 / dino 0.005
   (`aag256_celebahq_titok_dino_gm.yaml`) → aag36 its adversary (`chain_v11.sh`). aag33 (28k strong adversary) 35.2 @ep470/600.
+- **09-06 08:00:** aag33 (28k adversary w1.0/200ep on aag3) final FID-10k **34.43** (FID-50k running). **aag35** (grad-matched DINO,
+  plain) 34.3 @ep120/400 and falling — the DINO term at 0.005 is the biggest plain-generator lever found; aag36 (its adversary)
+  chained. **aag37** = dino 0.02 bracket on node A while the 3M ImageNet assignment finishes (~09:20) → aag29 queues behind it.
