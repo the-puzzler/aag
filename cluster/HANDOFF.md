@@ -418,3 +418,9 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   transport (300k 134 → 2M 110); aag2 final 138.3; **aag22** (150M — width 1.9 + class embedding, not 133.6M; 2M assignment) running,
   epoch 2 = 161.6 vs aag2 165.2. 3M assignment finishing locally → `imagenet_3m_pipeline.sh` uploads `assign_cls_3m_slim.pt` → aag29.
   Node B: aag27 (x2 plain, width 0.5) → aag28 (its adversary w1.0 200 ep). Chains: `chain_v8.sh`.
+- **09-06 morning (user awake):** aag26 FID-50k **28.18**. User asked for the ROMS-IMLE pixel loss recipe (LPIPS 1.0 + DINO 1.0 +
+  pixel 0.1): trainer now has `--mse-weight/--dino-weight` (DINOv2 ViT-B/14 via torch.hub, offline mirror at
+  `/mnt/shared/aag/torch_hub`, config env `TORCH_HOME`). Node B chain (`chain_v9.sh`): aag27 (x2 w0.5 plain) → **aag30** (x2 DINO
+  recipe, image tag in `dino_image_tag`) → aag28 (w0.5 adversary) → aag31 (DINO recipe + adversary). Node A: `wait29.sh` submits
+  aag29 (3M assignment) when `assign_cls_3m_slim.pt` lands on EFS. aag22 epoch 4: 146.8 vs aag2 152.0. Compact AEs (d64/128/256)
+  were a wash: FID 39.4/39.7/43.1 vs TiTok 38.4 — better N/d paid for by the decoder floor.
