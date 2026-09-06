@@ -455,3 +455,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Weight 0.5 (aag44): **FID-10k 28.8 @ +10 epochs, FID-50k 27.71 (valid best)**, then drifts up at the reset LR (38 @ep210).
   Queued (`chain_v19.sh`): aag46 = short low-LR fresh finetune (30 ep, 3e-5), aag47 = fresh 0.5 + pairwise 1.0, aag41 (AAG2
   control); aag45 = no-adversary finetune control after aag22. Image tag `84229c6`.
+- **09-06 18:00 — z-routing experiment (research agent):** `Generator256(z_bottleneck, z_skip, z_skip_rank)`; trainer flags
+  `--z-bottleneck/--z-skip/--z-skip-rank`. Sweep aag48–52 (bott64, +lowrank8, +full, bott16, bott16+lowrank8) on the third node
+  after aag45, DINO-0.02 recipe, vs flat aag37 (33.3 / 32.31). `chain_v20.sh`, tag `route_image_tag`. Fresh-z adversary: control
+  aag45 flat at 33.5–33.9 → the aag42/aag44 rises are adversarial instability; aag46 (short low-LR) and aag47 (fresh+pairwise) queued.
