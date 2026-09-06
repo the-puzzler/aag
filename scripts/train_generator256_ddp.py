@@ -54,6 +54,10 @@ ap.add_argument("--warmup", type=int, default=2000)
 ap.add_argument("--wd", type=float, default=0.01)
 ap.add_argument("--grad-clip", type=float, default=1.0)
 ap.add_argument("--lpips-weight", type=float, default=0.5)
+ap.add_argument("--mse-weight", type=float, default=1.0, help="pixel MSE weight (ROMS-IMLE pixel recipe: 0.1 with LPIPS 1.0 and DINO 1.0)")
+ap.add_argument("--dino-weight", type=float, default=0.0,
+                help="0 = off; L2 between DINOv2 ViT-B/14 features (CLS + patch tokens, 224x224 input) of prediction and target. "
+                     "Loaded via torch.hub from $TORCH_HOME (mirror at /mnt/shared/aag/torch_hub on the cluster).")
 ap.add_argument("--ema", type=float, default=0.9995)
 ap.add_argument("--val-frac", type=float, default=0.01)
 ap.add_argument("--eval-every", type=int, default=1, help="epochs")
@@ -177,6 +181,28 @@ perceptual = lpips.LPIPS(net="vgg", verbose=False).to(dev).eval()
 for p in perceptual.parameters():
     p.requires_grad_(False)
 
+
+class DinoFeatures(torch.nn.Module):
+    """DINOv2 ViT-B/14 feature distance: images in [-1,1] -> 224x224, ImageNet-normalised -> CLS + patch tokens.
+    Weights are frozen; the repo/checkpoint come from torch.hub's cache (offline on the cluster: TORCH_HOME mirror)."""
+    def __init__(self):
+        super().__init__()
+        self.net = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14", verbose=False, trust_repo=True, skip_validation=True).eval()
+        for p in self.net.parameters():
+            p.requires_grad_(False)
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+    def forward(self, x):
+        x = F.interpolate((x + 1) / 2, size=(224, 224), mode="bilinear", align_corners=False, antialias=True)
+        out = self.net.forward_features((x - self.mean) / self.std)
+        return out["x_norm_clstoken"], out["x_norm_patchtokens"]
+    def distance(self, pred, tgt):
+        cp, pp = self(pred)
+        with torch.no_grad():
+            ct, pt = self(tgt)
+        return F.mse_loss(cp, ct) + F.mse_loss(pp, pt)
+dino = DinoFeatures().to(dev) if a.dino_weight > 0 else None
+
 opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.99), weight_decay=a.wd)
 adv = a.gan_weight > 0
 disc = opt_d = None
@@ -245,7 +271,7 @@ fwd = torch.compile(model) if a.compile else model
 
 log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''} width={a.width} n_res={a.n_res}  batch {a.batch}x{world}={a.batch * world}  "
     f"{steps_per_epoch:,} steps/epoch x {a.epochs} epochs  lr {a.lr} warmup {a.warmup}  ema {a.ema}")
-log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  lpips_weight {a.lpips_weight}  "
+log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  mse_weight {a.mse_weight}  lpips_weight {a.lpips_weight}  dino_weight {a.dino_weight}  "
     f"fid: {'every eval, n=' + str(a.fid_n) + ' vs ' + a.fid_stats if a.fid_stats else 'off'}")
 
 if is_main:
@@ -305,6 +331,7 @@ for epoch in range(start_epoch, a.epochs):
     model.train()
     perm = tr_idx[torch.randperm(tr_idx.numel(), device=dev)]
     run_mse, run_lp, run_n = 0.0, 0.0, 0
+    run_dn = 0.0
     run_g = run_d = run_w = 0.0
     for i in range(steps_per_epoch):
         b = perm[i * a.batch:(i + 1) * a.batch]
@@ -316,7 +343,12 @@ for epoch in range(start_epoch, a.epochs):
         pred = pred.float()
         mse = F.mse_loss(pred, tgt)
         perc = perceptual(pred.clamp(-1, 1), tgt).mean() if a.lpips_weight > 0 else torch.zeros((), device=dev)
-        loss = mse + a.lpips_weight * perc
+        if dino is not None:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                dn = dino.distance(pred.clamp(-1, 1), tgt).float()
+        else:
+            dn = torch.zeros((), device=dev)
+        loss = a.mse_weight * mse + a.lpips_weight * perc + a.dino_weight * dn
         opt.zero_grad(set_to_none=True)
         if adv:
             # generator step: fool the pair critic; the adaptive weight measures the adversarial
@@ -343,7 +375,7 @@ for epoch in range(start_epoch, a.epochs):
             for pe, pm in zip(ema.parameters(), raw.parameters()):
                 pe.lerp_(pm, 1 - a.ema)
         gstep += 1
-        run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel()
+        run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel(); run_dn += dn.item() * b.numel()
         if is_main and gstep % a.log_every == 0:
             el = time.time() - t0
             print(f"  ep {epoch + 1} step {gstep - sched0:,}/{total_steps:,}  mse {run_mse / run_n:.5f}  lpips {run_lp / run_n:.4f}  "
@@ -357,7 +389,7 @@ for epoch in range(start_epoch, a.epochs):
         vm, vl = evaluate(ema)
         fid = fid_fresh(ema) if a.fid_stats else None
         curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid)
-        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}  "
+        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + "  "
             f"heldout_mse={vm:.5f} heldout_lpips={vl:.4f}" + (f"  fid@{a.fid_n}={fid:.2f}" if fid is not None else "")
             + f"  [{(time.time() - t0) / 3600:.2f} h]")
         if is_main:
@@ -378,7 +410,7 @@ for epoch in range(start_epoch, a.epochs):
             Path(str(ck) + ".tmp").replace(ck)
             (a.out / "curve.json").write_text(json.dumps(curve, indent=1))
     else:
-        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}  [{(time.time() - t0) / 3600:.2f} h]")
+        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + f"  [{(time.time() - t0) / 3600:.2f} h]")
     if ddp:
         dist.barrier()
 log("done")
