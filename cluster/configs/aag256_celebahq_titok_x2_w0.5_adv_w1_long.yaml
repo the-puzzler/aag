@@ -1,0 +1,28 @@
+# CelebA-HQ 256, x2 pairs, half-width generator: pairwise-adversary finetune (gan-weight 1.0, 200 ep) of aag27's epoch-200 checkpoint.
+# User (2026-09-05): adversary goes on the generator, not the AE; pipeline order = plain generator first, then extras.
+name: aag256_celebahq_titok_x2_w0.5_adv_w1_long
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+  ASSIGN: /mnt/shared/aag/results_scale256/celebahq_titok_x2/assign/assign_uncond_x2_refine_a1_best.pt
+  RESUME: /mnt/shared/aag/results_scale256/celebahq_titok_x2/gen_uncond_x2_refine_a1_w0.5/checkpoints/gen_ep200.pt
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/celebahq256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: wait_assignment
+    cmd: python cluster/wait_for_file.py $ASSIGN --hours 1
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset celebahq256 --n 0 --out $D/celebahq256/fid_stats_train_28000.npz
+  - name: generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset celebahq256
+      --n-classes 0 --width 0.5 --aug-hflip --resume $RESUME --reset-schedule --epochs 400 --batch 32 --lr 1e-4 --warmup 500 --val-frac 0.02 --eval-every 10
+      --gan-weight 1.0 --gan-layers 3
+      --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq_titok_x2/gen_uncond_x2_refine_a1_w0.5_adv_w1_long
