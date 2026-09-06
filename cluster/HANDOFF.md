@@ -428,3 +428,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   28.18 is off the record; valid CelebA best stays aag8 33.7 until the 28k re-runs land. Submitted: **aag33** = adversary w1.0/200 ep
   on aag3 ep400 (node A; aag29 queues behind it), **aag32** = DINO recipe on 28k from scratch (node B, image 7bba9c8) → aag34 its
   adversary (`chain_v10.sh`). Configs `aag256_celebahq_titok_{dino,adv_w1_long,dino_adv_w1_long}.yaml`.
+- **09-06 07:40:** literal ROMS-IMLE weights (0.1/1/1) don't train (FID 404↑; DINO output-grad 1.30 vs LPIPS 0.0061 vs MSE 0.0001 →
+  DINO-only loss; `grad_balance.py`). User chose (a): aag32 deleted → **aag35** = gradient-matched mse 1 / lpips 0.5 / dino 0.005
+  (`aag256_celebahq_titok_dino_gm.yaml`) → aag36 its adversary (`chain_v11.sh`). aag33 (28k strong adversary) 35.2 @ep470/600.
