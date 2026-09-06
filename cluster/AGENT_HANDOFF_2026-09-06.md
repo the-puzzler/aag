@@ -102,7 +102,7 @@ Adversary finetune = same trainer with `--resume <ckpt> --reset-schedule --gan-w
 | aag33 | aag3 ep400 + adversary **w1.0 / 200 ep** | 34.43 | 33.16 |
 | aag35 | **DINO recipe** mse 1 / lpips 0.5 / dino 0.005, plain, best ep140 | 34.2 (drifts to 36.5 @400) | 33.02 |
 | aag37 | dino 0.02, plain, best ep160 | 33.3 (34.9 @400) | **32.31** (plain best) |
-| aag38 | dino 0.08, plain (running) | 37.4 @ep200, clearly worse | — |
+| aag38 | dino 0.08, plain | 36.58 final (worse than 0.02) | — |
 | aag36 | aag35 ep140 + adversary w1.0 / 200 ep | 30.29 | **29.16 (valid best)** |
 | aag39 | aag37 ep160 + adversary (queued after aag38) | — | — |
 | off-record (x2 flips): aag23 plain 37.77/36.40; aag24–26 adversary 33.6/31.6/29.57 (FID-50k 28.18) | | | |
