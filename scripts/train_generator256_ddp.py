@@ -385,7 +385,7 @@ for epoch in range(start_epoch, a.epochs):
                   flush=True)
     tr_mse, tr_lp = all_reduce_mean(run_mse / max(run_n, 1), run_n), all_reduce_mean(run_lp / max(run_n, 1), run_n)
     curve["epoch"].append(epoch + 1); curve["train_mse"].append(tr_mse); curve["train_lpips"].append(tr_lp)
-    if (epoch + 1) % a.eval_every == 0 or epoch + 1 == a.epochs:
+    if (a.eval_every > 0 and (epoch + 1) % a.eval_every == 0) or epoch + 1 == a.epochs:
         vm, vl = evaluate(ema)
         fid = fid_fresh(ema) if a.fid_stats else None
         curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid)
