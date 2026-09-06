@@ -108,7 +108,7 @@ Adversary finetune = same trainer with `--resume <ckpt> --reset-schedule --gan-w
 | off-record (x2 flips): aag23 plain 37.77/36.40; aag24–26 adversary 33.6/31.6/29.57 (FID-50k 28.18) | | | |
 
 ImageNet (TiTok-512, class-conditional, hierarchy-level transport, FID-10k vs full-train stats):
-aag2 (285M, 300k steps) final **138.3**; aag22 (150M, 2M steps) 139.9 @ep18/40 (≈4–5 ahead of aag2 at equal epoch);
+aag2 (285M, 300k steps) final **138.3**; aag22 (150M, 2M steps) final **133.6**;
 aag29 (150M, 3M steps) 166.3 @ep2 (running). Latent-space fresh-z FID by assignment length: 300k 134 → 1M 121 → 2M 110 → 3M 103.
 
 ## 5. Key scripts (all in the worktree)
