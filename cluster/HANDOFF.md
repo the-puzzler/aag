@@ -439,3 +439,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Both drift up after the plateau (36.5 / ~34.3 at ep400) → adversary finetunes resume from the BEST checkpoint: aag36 (from
   aag35 ep140, running), aag39 (from aag37 ep160, chained after aag38 = dino 0.08 bracket). Scratch checkpoints moved to
   `/opt/dlami/nvme/aag_scratch/ckpts` (user: use the large drives; root disk was at 84%).
+- **09-06 10:00:** **aag36 FID-50k 29.16** (valid best: 28k, 38M, DINO-0.005 generator ep140 + adversary w1.0/200 ep). Node B → aag38
+  (dino 0.08 bracket) → aag39 (adversary on aag37 ep160, dino 0.02). Node A: aag29 (ImageNet 3M assignment, 150M) running;
+  aag22 (2M) at epoch 14: 141.3. 3M assignment diagnostics: fresh latent FID 102.8, critic 56%.
