@@ -485,3 +485,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   aag65 on node B (`chain_v27.sh`). Nonlinear compressor: 2×512 36.3, 4×1024 37.8 (linear r=16: 30.9) — nonlinear hurts; 6×2048 running.
 - **09-07 12:15:** nonlinear compressor sweep negative (36.3 / 37.8 / 36.8 vs linear 30.9); 800-epoch schedule worse than 400 (r=16: 31.7 vs
   30.9). aag66 (r=32 × 800) running for confirmation; aag67 (ImageNet + r=32 bottleneck) running; aag68 (ImageNet fresh finetune) starting.
+- **09-07 15:30 — ImageNet:** aag68 (aag57 ep4 + 1 epoch fresh-z adversary 0.5) FID-10k **82.6 / FID-50k 80.00**; 2nd epoch collapsed (193);
+  1-epoch cosine (aag70) 106.9 — gain is mid-schedule at high LR, as on CelebA. aag57 ep4 plain: FID-50k 88.21. aag67 (r=32 bottleneck) stuck
+  at ~320 — awaiting the user's kill/relaunch decision (rank-128 config ready). CelebA: aag66 (r=32, 800 ep) 31.75 < 400-ep schedule; aag69 = r=32 seed 1.
