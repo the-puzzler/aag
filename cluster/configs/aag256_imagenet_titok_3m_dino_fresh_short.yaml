@@ -28,4 +28,4 @@ stages:
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset imagenet256
       --width 1.9 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 6 --batch 32 --lr 1e-4 --warmup 500 --val-frac 0.01 --eval-every 1 --fresh-gan-weight 0.5 --fresh-gan-layers 3
-      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --resume auto --out $R/imagenet_titok/gen_cls_3m_dino_fresh_short
+      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --out $R/imagenet_titok/gen_cls_3m_dino_fresh_short
