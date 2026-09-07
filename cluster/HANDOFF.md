@@ -483,3 +483,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-07 10:30 — ImageNet:** aag57 (3M + DINO-0.02) min **91.4 @ep4**, final 106.3 (std recipe 131.9). Next, separately: **aag67** =
   + rank-32 bottleneck from scratch (node A, tag `c94ddbc`), **aag68** = short fresh-z finetune (0.5, lr 1e-4, 2 ep) of aag57 ep4 after
   aag65 on node B (`chain_v27.sh`). Nonlinear compressor: 2×512 36.3, 4×1024 37.8 (linear r=16: 30.9) — nonlinear hurts; 6×2048 running.
+- **09-07 12:15:** nonlinear compressor sweep negative (36.3 / 37.8 / 36.8 vs linear 30.9); 800-epoch schedule worse than 400 (r=16: 31.7 vs
+  30.9). aag66 (r=32 × 800) running for confirmation; aag67 (ImageNet + r=32 bottleneck) running; aag68 (ImageNet fresh finetune) starting.
