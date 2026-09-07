@@ -480,3 +480,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   sweep aag63–65 (2×512 / 4×1024 / 6×2048 at r=16) on node B (`chain_v25.sh`). ImageNet aag57 (DINO): 91 @ep4 → 107 @24, awaiting decay.
 - **09-07 08:10:** aag61 (rank-32 bottleneck, plain) FID-10k 29.85 / **FID-50k 28.40** — plain record; rank optimum ≈32. aag62 (r=16, 800 ep)
   running, aag66 (r=32, 800 ep) chained (`chain_v26.sh`). Nonlinear compressor sweep aag63–65 on node B. aag57 ImageNet DINO flat at 107.
+- **09-07 10:30 — ImageNet:** aag57 (3M + DINO-0.02) min **91.4 @ep4**, final 106.3 (std recipe 131.9). Next, separately: **aag67** =
+  + rank-32 bottleneck from scratch (node A, tag `c94ddbc`), **aag68** = short fresh-z finetune (0.5, lr 1e-4, 2 ep) of aag57 ep4 after
+  aag65 on node B (`chain_v27.sh`). Nonlinear compressor: 2×512 36.3, 4×1024 37.8 (linear r=16: 30.9) — nonlinear hurts; 6×2048 running.
