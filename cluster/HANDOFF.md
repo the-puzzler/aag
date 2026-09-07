@@ -488,3 +488,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-07 15:30 — ImageNet:** aag68 (aag57 ep4 + 1 epoch fresh-z adversary 0.5) FID-10k **82.6 / FID-50k 80.00**; 2nd epoch collapsed (193);
   1-epoch cosine (aag70) 106.9 — gain is mid-schedule at high LR, as on CelebA. aag57 ep4 plain: FID-50k 88.21. aag67 (r=32 bottleneck) stuck
   at ~320 — awaiting the user's kill/relaunch decision (rank-128 config ready). CelebA: aag66 (r=32, 800 ep) 31.75 < 400-ep schedule; aag69 = r=32 seed 1.
+- **09-07 21:30:** aag67 (ImageNet r=32) descending slowly from 320 → 277 @ep30 — rank 32 starves ImageNet; **aag71** (rank 128) chained
+  after it (`chain_v28.sh`, tag `c94ddbc`). CelebA: r=32 seed 1 30.78 (seed 0 29.85) → r=16 ≈ r=32 within seed noise; bottleneck gain
+  over flat robust. ImageNet FID-50k: 80.00 (aag68 ep5, +fresh critic), 88.21 (aag57 ep4 plain). Nodes B and third idle awaiting direction.
