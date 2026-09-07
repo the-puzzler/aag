@@ -472,3 +472,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-06 22:40:** fresh-z short recipe: weight bracket 0.25 → 32.6, **0.5 → 28.6 (seed 2: 28.9)**, 1.0 → 31.9 then unstable; on the
   standard-recipe generator (aag58) no gain (39.1) — needs the DINO base. aag41 (AAG2 block-100) 39.7 best = same as floor ckpt.
   ImageNet aag57 (3M + DINO-0.02): FID-10k **113.4 @ epoch 2** (std recipe 166 @2, 132 final). Node B idle; third node on aag50–52.
+- **09-07 02:20 — z-routing sweep:** FID-50k plain: flat 32.31 · bott64 30.56 · +lowrank8 31.57 · +full skips 43 (FID-10k) ·
+  **bott16 30.06** · bott16+lowrank8 30.34. Tighter trunk keeps helping, every bypass hurts, no post-plateau drift with a bottleneck.
+  aag59 (r=8) → aag60 (r=4) chained (`chain_v23.sh`). ImageNet aag57 (DINO): min 91.4 @ep4, drifting (98.9 @12).
