@@ -49,6 +49,8 @@ ap.add_argument("--n-res", type=int, default=2)
 ap.add_argument("--z-bottleneck", type=int, default=0, help="flat z: hard rank-r linear bottleneck before the 8x8 stem (0 = off)")
 ap.add_argument("--z-skip", choices=["none", "full", "lowrank"], default="none", help="z bypass into every up-stage: none | full (unrestricted, gate init 1) | lowrank (shared rank-k, gate init 0.1)")
 ap.add_argument("--z-skip-rank", type=int, default=32)
+ap.add_argument("--z-pre-depth", type=int, default=0, help="nonlinear compressor before the rank-r code: number of SiLU MLP layers (0 = linear)")
+ap.add_argument("--z-pre-width", type=int, default=512)
 ap.add_argument("--cond-dim", type=int, default=512)
 ap.add_argument("--epochs", type=int, default=40)
 ap.add_argument("--batch", type=int, default=32, help="per GPU")
@@ -180,7 +182,8 @@ if a.arch == "residual":
 else:
     make = lambda: Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
                                 cond_dim=a.cond_dim, width=a.width, n_res=a.n_res,
-                                z_bottleneck=a.z_bottleneck, z_skip=a.z_skip, z_skip_rank=a.z_skip_rank).to(dev)
+                                z_bottleneck=a.z_bottleneck, z_skip=a.z_skip, z_skip_rank=a.z_skip_rank,
+                                z_pre_depth=a.z_pre_depth, z_pre_width=a.z_pre_width).to(dev)
 model = make()
 n_params = sum(p.numel() for p in model.parameters())
 ema = make().eval()
@@ -294,7 +297,7 @@ if adv:
 fwd = torch.compile(model) if a.compile else model
 
 log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''} width={a.width} n_res={a.n_res}"
-    f"{' z_bottleneck=' + str(a.z_bottleneck) if a.z_bottleneck else ''}{' z_skip=' + a.z_skip + ('/k' + str(a.z_skip_rank) if a.z_skip == 'lowrank' else '') if a.z_skip != 'none' else ''}  batch {a.batch}x{world}={a.batch * world}  "
+    f"{' z_bottleneck=' + str(a.z_bottleneck) if a.z_bottleneck else ''}{' z_pre=' + str(a.z_pre_depth) + 'x' + str(a.z_pre_width) if a.z_pre_depth else ''}{' z_skip=' + a.z_skip + ('/k' + str(a.z_skip_rank) if a.z_skip == 'lowrank' else '') if a.z_skip != 'none' else ''}  batch {a.batch}x{world}={a.batch * world}  "
     f"{steps_per_epoch:,} steps/epoch x {a.epochs} epochs  lr {a.lr} warmup {a.warmup}  ema {a.ema}")
 log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  mse_weight {a.mse_weight}  lpips_weight {a.lpips_weight}  dino_weight {a.dino_weight}  "
     f"fid: {'every eval, n=' + str(a.fid_n) + ' vs ' + a.fid_stats if a.fid_stats else 'off'}")
@@ -458,7 +461,8 @@ for epoch in range(start_epoch, a.epochs):
                         "epoch": epoch + 1, "gstep": gstep, "curve": curve, "args": vars(a), "dim_z": dim_z,
                         "grid": grid, "n_classes": n_classes, "width": a.width, "n_res": a.n_res,
                         "cond_dim": a.cond_dim, "assignment": a.assignment, "arch": a.arch, "ch": a.ch,
-                        "z_bottleneck": a.z_bottleneck, "z_skip": a.z_skip, "z_skip_rank": a.z_skip_rank}, str(ck) + ".tmp")
+                        "z_bottleneck": a.z_bottleneck, "z_skip": a.z_skip, "z_skip_rank": a.z_skip_rank,
+                        "z_pre_depth": a.z_pre_depth, "z_pre_width": a.z_pre_width}, str(ck) + ".tmp")
             Path(str(ck) + ".tmp").replace(ck)
             (a.out / "curve.json").write_text(json.dumps(curve, indent=1))
     else:

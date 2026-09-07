@@ -103,7 +103,8 @@ class Generator256(nn.Module):
     def __init__(self, dim_z: int, grid: int = 8, image_size: int = 256,
                  n_classes: int = 0, cond_dim: int = 512, width: float = 1.0,
                  n_res: int = 2, base_channels=(512, 512, 256, 128, 64),
-                 z_bottleneck: int = 0, z_skip: str = "none", z_skip_rank: int = 32):
+                 z_bottleneck: int = 0, z_skip: str = "none", z_skip_rank: int = 32,
+                 z_pre_depth: int = 0, z_pre_width: int = 512):
         """Routing experiment (user's research agent, 2026-09-06), flat-z only:
         z_bottleneck=r>0  -- hard rank-r linear bottleneck z(D) -> r -> 8x8 grid: the trunk sees only an
                              r-dimensional projection of z (interpolation problem reduced to r dims)
@@ -111,6 +112,9 @@ class Generator256(nn.Module):
                              map to the stage channels, broadcast spatially, learned scalar gate init 1)
         z_skip="lowrank"  -- same bypass but through one shared rank-k projection (z_skip_rank) and a
                              learned scalar gate per stage initialised at 0.1
+        z_pre_depth=D>0   -- NONLINEAR compressor in front of the rank-r code (user, 2026-09-07: "nonlinear compression
+                             allows stronger routing"): Linear(D_z, W) SiLU [Linear(W, W) SiLU]x(D-1) Linear(W, r);
+                             the code itself stays a hard r-dim vector and everything after it is unchanged
         """
         super().__init__()
         # grid=0: z is a FLAT latent with no spatial layout (a 1-D tokenizer such as
@@ -138,7 +142,13 @@ class Generator256(nn.Module):
                                           nn.SiLU(), nn.Linear(cond_dim, cond_dim))
         self.z_bottleneck, self.z_skip = z_bottleneck, z_skip
         if self.flat and z_bottleneck > 0:
-            self.bott = nn.Linear(dim_z, z_bottleneck)
+            if z_pre_depth > 0:
+                layers = [nn.Linear(dim_z, z_pre_width), nn.SiLU()]
+                for _ in range(z_pre_depth - 1):
+                    layers += [nn.Linear(z_pre_width, z_pre_width), nn.SiLU()]
+                self.bott = nn.Sequential(*layers, nn.Linear(z_pre_width, z_bottleneck))
+            else:
+                self.bott = nn.Linear(dim_z, z_bottleneck)
             self.lay = nn.Linear(z_bottleneck, self.cz * grid * grid)
         else:
             self.bott = None
