@@ -475,3 +475,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-07 02:20 — z-routing sweep:** FID-50k plain: flat 32.31 · bott64 30.56 · +lowrank8 31.57 · +full skips 43 (FID-10k) ·
   **bott16 30.06** · bott16+lowrank8 30.34. Tighter trunk keeps helping, every bypass hurts, no post-plateau drift with a bottleneck.
   aag59 (r=8) → aag60 (r=4) chained (`chain_v23.sh`). ImageNet aag57 (DINO): min 91.4 @ep4, drifting (98.9 @12).
+- **09-07 06:00:** rank sweep done (flat 33.3 · 64 31.5 · **16 30.9 / FID-50k 30.06** · 8 33.7 · 4 67.1; skips always hurt). Follow-ups
+  aag61 (r=32) → aag62 (r=16, 800 ep) on the third node. User: make the compressor nonlinear → `--z-pre-depth/--z-pre-width`,
+  sweep aag63–65 (2×512 / 4×1024 / 6×2048 at r=16) on node B (`chain_v25.sh`). ImageNet aag57 (DINO): 91 @ep4 → 107 @24, awaiting decay.
