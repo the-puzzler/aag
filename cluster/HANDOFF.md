@@ -491,3 +491,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-07 21:30:** aag67 (ImageNet r=32) descending slowly from 320 → 277 @ep30 — rank 32 starves ImageNet; **aag71** (rank 128) chained
   after it (`chain_v28.sh`, tag `c94ddbc`). CelebA: r=32 seed 1 30.78 (seed 0 29.85) → r=16 ≈ r=32 within seed noise; bottleneck gain
   over flat robust. ImageNet FID-50k: 80.00 (aag68 ep5, +fresh critic), 88.21 (aag57 ep4 plain). Nodes B and third idle awaiting direction.
+- **09-08 13:00:** ImageNet bottleneck negative: r=32 262.8, r=128 120.9 vs flat DINO 106.3 / best 91.4. CelebA nonlinear compressor at r=32
+  (aag72) 35.7 — nonlinear worse at every rank. Decomposition (FID@5k assigned/fresh): flat 10.0/34.4, linear r32 **7.7/30.5**, nonlinear
+  10–13/36–39 — linear bottleneck better on both targets, nonlinear worse on both (Gaussianity of the code is preserved only by a linear
+  map). aag73 (4×1024 @ r32) finishing. All three nodes otherwise idle; user considering direction.
