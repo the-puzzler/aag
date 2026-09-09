@@ -556,3 +556,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Critic winning (df ~0.5) but stable. Ladder (big critic, constant 5e-5) 40/160/320 ep: 22.93/18.89/16.79. aag108 continues to 880 (queued behind the two-sample runs).
   Two-sample loss (user idea): `--ts-loss mmd|swd` in frozen DINO CLS space, gathered 256 vs 256, floor = EMA of stat(assigned_t, assigned_t−1), clamp 0; smoke: fresh/assigned stat 2–3x the floor.
   aag106 (MMD) running, aag107 (SWD) queued; same recipe as aag92 (r32, constant 5e-5, 40 ep) for a direct comparison with the critic (24.84 / 23.56).
+- **09-10 10:30:** aag105 (seed-1 repeat of aag102, big critic, 160 ep): 19.32 @560 (seed 0: 20.02), monotonic; **final FID-50k 18.12** (seed 0: 18.89) — reproduces within ~0.8.
