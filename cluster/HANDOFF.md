@@ -520,3 +520,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   (aag88 fixed 0.3: 26.32 @406 then 30.0) and NOT cosine decay (aag90 constant 1e-4: 26.05 @406 then 32.8 — worst fade). It is high LR held too long.
   **aag91 constant 5e-5: monotonic 29.6 → 26.80 @414, flat 26.9 to the end; final ep420 FID-50k 25.56 (stable, no picking).** New flag `--min-lr-frac` (1.0 = constant).
   Running: aag92 (5e-5, 40 ep), aag93 (3e-5, 40 ep), aag89 (ImageNet). Image tag: jobs tmp const_image_tag.
+- **09-09 19:30:** constant 5e-5 for 40 ep (aag92): 24.84 @440 still descending, **final-checkpoint FID-50k 23.56 (record, stable)**; 3e-5 (aag93) 26.20 — 5e-5 is the LR.
+  Bottleneck still needed with the critic (matched cosine-1e-4 pair: flat aag87 28.21 vs r32 aag83 25.18 FID-50k). Queued: aag97 flat control at const 5e-5/40 ep, aag96 r32 80 ep.
+  From scratch (user question): aag94 (w1.0) / aag95 (w0.5) = aag61 recipe with the critic on from step 1, ~14 h.
