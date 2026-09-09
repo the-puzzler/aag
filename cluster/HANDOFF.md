@@ -528,3 +528,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-09 21:30:** flat control at the best schedule (aag97: flat DINO + distributional critic 1.0, constant 5e-5, 40 ep): plateau 29.4–29.6 from ep174, final 29.41 / FID-50k 28.21 (same as its cosine run aag87) —
   vs r32 bottleneck on the identical schedule 24.84 (aag92). Bottleneck worth ~4.5 FID with the critic. User asked for speed → aag96/98/99 now run in PARALLEL (6 nodes for ~3 h).
   CelebA epoch ≈ 36 s (40 ep ≈ 30 min incl. evals); ImageNet epoch ≈ 0.6 h.
+- **09-09 23:00 — from scratch (interim, ep190/400):** aag95 (r32 + distributional critic **0.5** on from step 1, aag61 recipe) monotonic 25.12 @190 — already
+  below plain aag61's endpoint (29.85 @400) and near the finetune record (24.84) at under half the schedule. aag94 (w1.0 from scratch) unstable: 108 @60, 133 @90, 73 @190 —
+  1.0 is right for finetuning a converged generator, too strong while the generator is forming. Critic balanced in both (df 0.90–0.95).
