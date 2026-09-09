@@ -540,3 +540,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Its critic also drifts toward winning (df 0.72, mult 0.009 by the end). Running: aag100 (scratch, 220-ep cosine), aag101 (scratch, fixed 0.05); aag96 chained after aag99.
 - **09-10 04:00:** aag96 (standard critic, constant 5e-5, **80 ep**): 23.72 @480 still descending, no collapse in 70k steps; **final FID-50k 22.58 — stable-endpoint record.**
   Second 40 epochs gained 1.7 FID-10k over the first 40. aag102 = big critic x 160 ep running. Stable FID-50k ladder: 25.56 (20 ep) → 23.56 (40) → 22.58 (80); big critic 40 ep 22.93.
+- **09-10 04:30 — from-scratch collapse is the ADAPTIVE WEIGHT, not the LR:** aag100 (220-ep cosine) collapsed at ep150–180 (27.45 → 58) with LR already ≈4.6e-5.
+  Both from-scratch collapses (aag95 @220, aag100 @160) happen at the same quality point (FID high-20s, generator reaching the anchors) with the same signature: df→0.68, gf→1.1, realised multiplier→0.004.
+  Mechanism: multiplier = ||∇sup||/||∇adv|| × w; as the generator converges on the anchors ∇sup shrinks → push on the fresh branch vanishes → fresh branch drifts → critic wins → ∇adv grows → multiplier shrinks further (positive feedback).
+  Finetunes from a converged generator are stable because ∇sup is already small and steady. aag101 (fixed 0.05) is the test: 32.1 @120, df 1.00.
