@@ -548,3 +548,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 06:30:** aag102 (big critic 4L/ndf128, constant 5e-5, **160 ep** from aag61 ep400): FID-10k 20.02 @560 still descending, no collapse in 140k steps;
   **final FID-50k 18.89 — first sub-20, stable last checkpoint.** Critic drifting toward winning (df 0.60) but the multiplier stays ~0.012 on the converged generator.
   aag104 = continue from aag102 ep560 for 160 more epochs (critic state resumes). Ladder (standard critic) 20/40/80 ep: 25.56/23.56/22.58; big critic 40/160 ep: 22.93/18.89.
+- **09-10 07:30 — from scratch: PARKED.** aag101 (fixed 0.05) also collapsed: 22.96 @240 → 37 @260 → 131 @390 (df 0.54, gf 2.0). The fixed multiplier delayed the collapse ~40 ep but did not prevent it,
+  so the adaptive throttle is a contributor, not the cause. All three from-scratch variants (adaptive w0.5, 220-ep cosine, fixed 0.05) break when the generator reaches the anchors (FID low/mid-20s),
+  regardless of the LR at that moment (1e-4, 4.6e-5, 5.5e-5). Best from-scratch number stays the picked aag95 ep210 (FID-50k 22.29). Finetune route is stable and better (18.89) → pursue that.
+  aag105 = seed-1 repeat of aag102 (queued on aag101's node).
