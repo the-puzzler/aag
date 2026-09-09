@@ -504,3 +504,11 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-09 12:15:** weight bracket on the r32 bottleneck generator: 0.5 none · 1.0 27.28 (FID-50k 25.87) · 2.0 28.55→collapse. Seed-1 repeat
   of 1.0 (aag79): min 29.03 then collapse — 25.87 is seed-fragile, not a recipe. Reproducible best remains flat DINO + fresh 0.5 (27.45).
   Next lever if pursued: stabilise the critic (lower critic LR / R1 / EMA critic) + eval every epoch to widen the productive window.
+- **09-09 14:40 — critic training-set variants (user ideas), 20-ep finetunes on the flat DINO generator (aag37 ep160, w0.5) and the r32 bottleneck (aag61 ep400, w1.0):**
+  `--fresh-critic-source assigned` (critic trained on real vs G(z_assigned), generator pushed at fresh z): aag80 flat 31.11 @168 then 45; aag81 r32 28.50 @406 then 65.
+  Worse than the fresh-trained critic (28.6 / 27.3) and same collapse; critic saturates on decoder texture (df→0.006, gf→−15).
+  `--fresh-critic-source gen_assigned` (DISTRIBUTIONAL: critic separates G(z_assigned) ["real"] from G(z_fresh) ["fake"], no real images, only the fresh branch gets gradient):
+  aag82 flat w0.5 33.2→31.4 monotonic, no collapse (critic in equilibrium the whole run, realised mult 0.007–0.02);
+  aag84 flat w2.0 31.1 @164 then 62; aag85 w4.0 diverges — collapse with the critic STILL balanced (adv term 0.5–2× the supervised gradient), so it is weight, not critic saturation;
+  **aag83 r32 w1.0: 29.1 → 27.5 → 26.67 @406 / FID-50k 25.18 (record), then settles at 29–30 instead of collapsing.** PNG: jobs tmp critic_variants_r32.png.
+  Running: aag86 (aag83 seed 1), aag87 (flat, gen_assigned w1.0). Image tag d1c05fc.
