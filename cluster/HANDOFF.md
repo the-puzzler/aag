@@ -538,3 +538,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 02:00:** aag98 ImageNet at constant 5e-5, w1.0: FID-10k **47.2 @5 / FID-50k 44.76**, 47.4 @6, 49.8 @7, 78 @8 (collapse with the aag95 signature: critic winning, multiplier throttled).
   aag99 (aag92 recipe, critic 4 layers / ndf 128 = 27.8M): 24.18 @440 vs 24.84 standard; **final FID-50k 22.93 vs 23.56** — small real gain (~2x the FID-50k seed spread of 0.3); new stable-endpoint record.
   Its critic also drifts toward winning (df 0.72, mult 0.009 by the end). Running: aag100 (scratch, 220-ep cosine), aag101 (scratch, fixed 0.05); aag96 chained after aag99.
+- **09-10 04:00:** aag96 (standard critic, constant 5e-5, **80 ep**): 23.72 @480 still descending, no collapse in 70k steps; **final FID-50k 22.58 — stable-endpoint record.**
+  Second 40 epochs gained 1.7 FID-10k over the first 40. aag102 = big critic x 160 ep running. Stable FID-50k ladder: 25.56 (20 ep) → 23.56 (40) → 22.58 (80); big critic 40 ep 22.93.
