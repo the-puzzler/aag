@@ -523,3 +523,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-09 19:30:** constant 5e-5 for 40 ep (aag92): 24.84 @440 still descending, **final-checkpoint FID-50k 23.56 (record, stable)**; 3e-5 (aag93) 26.20 — 5e-5 is the LR.
   Bottleneck still needed with the critic (matched cosine-1e-4 pair: flat aag87 28.21 vs r32 aag83 25.18 FID-50k). Queued: aag97 flat control at const 5e-5/40 ep, aag96 r32 80 ep.
   From scratch (user question): aag94 (w1.0) / aag95 (w0.5) = aag61 recipe with the critic on from step 1, ~14 h.
+- **09-09 20:30 — ImageNet:** aag89 = aag57 ep4 + distributional critic 0.5 (cosine 1e-4, 2 ep): FID-10k 61.9 @ep5 / **FID-50k 59.25** (aag68 real critic 80.00; plain 88.21); ep6 69.2 as LR decayed.
+  Critic balanced throughout (df 0.89–0.95). Queued aag98: same at constant 5e-5, w1.0, 4 ep (after aag97 flat control), then aag96.
