@@ -552,3 +552,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   so the adaptive throttle is a contributor, not the cause. All three from-scratch variants (adaptive w0.5, 220-ep cosine, fixed 0.05) break when the generator reaches the anchors (FID low/mid-20s),
   regardless of the LR at that moment (1e-4, 4.6e-5, 5.5e-5). Best from-scratch number stays the picked aag95 ep210 (FID-50k 22.29). Finetune route is stable and better (18.89) → pursue that.
   aag105 = seed-1 repeat of aag102 (queued on aag101's node).
+- **09-10 09:30:** aag104 (aag102 continued to **320 ep**): 17.86 @720, still slowly descending (2nd 160 ep: −2.2 FID-10k vs −5 for the 1st); **final FID-50k 16.79 — record.**
+  Critic winning (df ~0.5) but stable. Ladder (big critic, constant 5e-5) 40/160/320 ep: 22.93/18.89/16.79. aag108 continues to 880 (queued behind the two-sample runs).
+  Two-sample loss (user idea): `--ts-loss mmd|swd` in frozen DINO CLS space, gathered 256 vs 256, floor = EMA of stat(assigned_t, assigned_t−1), clamp 0; smoke: fresh/assigned stat 2–3x the floor.
+  aag106 (MMD) running, aag107 (SWD) queued; same recipe as aag92 (r32, constant 5e-5, 40 ep) for a direct comparison with the critic (24.84 / 23.56).
