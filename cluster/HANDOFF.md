@@ -512,3 +512,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   aag84 flat w2.0 31.1 @164 then 62; aag85 w4.0 diverges — collapse with the critic STILL balanced (adv term 0.5–2× the supervised gradient), so it is weight, not critic saturation;
   **aag83 r32 w1.0: 29.1 → 27.5 → 26.67 @406 / FID-50k 25.18 (record), then settles at 29–30 instead of collapsing.** PNG: jobs tmp critic_variants_r32.png.
   Running: aag86 (aag83 seed 1), aag87 (flat, gen_assigned w1.0). Image tag d1c05fc.
+- **09-09 16:00:** distributional critic REPRODUCES: aag86 (aag83 seed 1) 26.36 @406 / **FID-50k 24.87** (seed 0: 26.67 / 25.18), both seeds settle at 28.8–29 afterwards, no collapse.
+  Flat generator + gen_assigned w1.0 (aag87): 28.9 @170 and flat to the end, final ep180 FID-50k 28.21 (end-of-schedule checkpoint, not a window pick).
+  Gain fades after the peak because the adaptive multiplier decays 0.3 -> 0.03 with the LR -> aag88 = fixed 0.3 on r32. aag89 = ImageNet aag68 recipe with the distributional critic.
+  **Reproducible best is now CelebA-HQ FID-50k 24.9–25.2 (r32 linear bottleneck + DINO 0.02 + distributional critic 1.0, 6 finetune epochs from aag61 ep400).**
