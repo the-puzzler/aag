@@ -525,3 +525,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   From scratch (user question): aag94 (w1.0) / aag95 (w0.5) = aag61 recipe with the critic on from step 1, ~14 h.
 - **09-09 20:30 — ImageNet:** aag89 = aag57 ep4 + distributional critic 0.5 (cosine 1e-4, 2 ep): FID-10k 61.9 @ep5 / **FID-50k 59.25** (aag68 real critic 80.00; plain 88.21); ep6 69.2 as LR decayed.
   Critic balanced throughout (df 0.89–0.95). Queued aag98: same at constant 5e-5, w1.0, 4 ep (after aag97 flat control), then aag96.
+- **09-09 21:30:** flat control at the best schedule (aag97: flat DINO + distributional critic 1.0, constant 5e-5, 40 ep): plateau 29.4–29.6 from ep174, final 29.41 —
+  vs r32 bottleneck on the identical schedule 24.84 (aag92). Bottleneck worth ~4.5 FID with the critic. User asked for speed → aag96/98/99 now run in PARALLEL (6 nodes for ~3 h).
+  CelebA epoch ≈ 36 s (40 ep ≈ 30 min incl. evals); ImageNet epoch ≈ 0.6 h.
