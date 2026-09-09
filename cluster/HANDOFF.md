@@ -516,3 +516,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Flat generator + gen_assigned w1.0 (aag87): 28.9 @170 and flat to the end, final ep180 FID-50k 28.21 (end-of-schedule checkpoint, not a window pick).
   Gain fades after the peak because the adaptive multiplier decays 0.3 -> 0.03 with the LR -> aag88 = fixed 0.3 on r32. aag89 = ImageNet aag68 recipe with the distributional critic.
   **Reproducible best is now CelebA-HQ FID-50k 24.9–25.2 (r32 linear bottleneck + DINO 0.02 + distributional critic 1.0, 6 finetune epochs from aag61 ep400).**
+- **09-09 18:00 — schedule for the distributional critic (r32 + gen_assigned w1.0, 20 ep from aag61 ep400):** the post-peak fade is NOT the adaptive multiplier
+  (aag88 fixed 0.3: 26.32 @406 then 30.0) and NOT cosine decay (aag90 constant 1e-4: 26.05 @406 then 32.8 — worst fade). It is high LR held too long.
+  **aag91 constant 5e-5: monotonic 29.6 → 26.80 @414, flat 26.9 to the end; final ep420 FID-50k 25.56 (stable, no picking).** New flag `--min-lr-frac` (1.0 = constant).
+  Running: aag92 (5e-5, 40 ep), aag93 (3e-5, 40 ep), aag89 (ImageNet). Image tag: jobs tmp const_image_tag.
