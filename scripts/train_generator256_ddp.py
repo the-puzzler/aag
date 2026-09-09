@@ -56,6 +56,7 @@ ap.add_argument("--epochs", type=int, default=40)
 ap.add_argument("--batch", type=int, default=32, help="per GPU")
 ap.add_argument("--lr", type=float, default=2e-4)
 ap.add_argument("--warmup", type=int, default=2000)
+ap.add_argument("--min-lr-frac", type=float, default=0.0, help="cosine floor as a fraction of --lr (1.0 = constant LR after warmup)")
 ap.add_argument("--wd", type=float, default=0.01)
 ap.add_argument("--grad-clip", type=float, default=1.0)
 ap.add_argument("--lpips-weight", type=float, default=0.5)
@@ -254,7 +255,7 @@ def lr_at(s):
     if s < a.warmup:
         return a.lr * (s + 1) / a.warmup
     p = (s - a.warmup) / max(1, total_steps - a.warmup)
-    return a.lr * 0.5 * (1 + math.cos(math.pi * min(1.0, p)))
+    return a.lr * (a.min_lr_frac + (1 - a.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * min(1.0, p))))
 start_epoch, gstep = 0, 0
 curve = {"epoch": [], "train_mse": [], "train_lpips": [], "val_mse": [], "val_lpips": [], "fid": []}
 if a.resume == "auto":
@@ -276,7 +277,7 @@ if a.resume:
             if s < a.warmup:
                 return a.lr * (s + 1) / a.warmup
             p = (s - a.warmup) / max(1, total_steps - a.warmup)
-            return a.lr * 0.5 * (1 + math.cos(math.pi * min(1.0, p)))
+            return a.lr * (a.min_lr_frac + (1 - a.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * min(1.0, p))))
     else:
         opt.load_state_dict(R["opt"])
     if adv and "disc" in R:
@@ -285,7 +286,7 @@ if a.resume:
         fdisc.load_state_dict(R["fdisc"]); opt_fd.load_state_dict(R["opt_fd"])
     start_epoch, gstep, curve = R["epoch"], R["gstep"], R["curve"]
     log(f"resumed {a.resume}: epoch {start_epoch}, step {gstep:,}, last val_mse {curve['val_mse'][-1] if curve['val_mse'] else None}"
-        + (f"; fresh schedule: lr {a.lr}, warmup {a.warmup}, {total_steps:,} steps" if a.reset_schedule else ""))
+        + (f"; fresh schedule: lr {a.lr}, warmup {a.warmup}, {total_steps:,} steps, min_lr_frac {a.min_lr_frac}" if a.reset_schedule else ""))
 raw = model
 if ddp:
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local])
