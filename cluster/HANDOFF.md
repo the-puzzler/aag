@@ -536,5 +536,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   aag94 w1.0: never converged (108 @60, 133 @90, 57 @400). Weight 1.0 is for finetuning a converged generator only.
   Reading: the critic game is stable at LR ≤ 5e-5 and unstable when LR ≥ ~1e-4 is held for long once the generator is near the anchors (finetunes overshoot at 1e-4, from-scratch collapses when the cosine reaches 1e-4 after ep200). Early high LR from scratch is fine because the generator is far from the anchors.
 - **09-10 02:00:** aag98 ImageNet at constant 5e-5, w1.0: FID-10k **47.2 @5 / FID-50k 44.76**, 47.4 @6, 49.8 @7, 78 @8 (collapse with the aag95 signature: critic winning, multiplier throttled).
-  aag99 (aag92 recipe, critic 4 layers / ndf 128 = 27.8M): 24.18 @440 vs 24.84 standard — within run-to-run noise (~0.9); critic capacity is at most a mild limiter.
+  aag99 (aag92 recipe, critic 4 layers / ndf 128 = 27.8M): 24.18 @440 vs 24.84 standard; **final FID-50k 22.93 vs 23.56** — small real gain (~2x the FID-50k seed spread of 0.3); new stable-endpoint record.
   Its critic also drifts toward winning (df 0.72, mult 0.009 by the end). Running: aag100 (scratch, 220-ep cosine), aag101 (scratch, fixed 0.05); aag96 chained after aag99.
