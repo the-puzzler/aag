@@ -498,3 +498,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-09 10:30:** AAG2 400 blocks (aag74, Gaussian-indistinguishable) 42.65 best / FID-50k 41.84 vs floor 38.93 — fully Gaussian costs ~3.
   User-requested bottleneck × fresh critic: linear r32 + fresh (aag75) 29.85 → 29.64 (no gain); nonlinear 4×1024@r32 + fresh (aag76)
   34.3 → 29.96. Bottleneck family converges on ~29.6–30 regardless; flat DINO + fresh critic remains best (28.58 / 27.45). All nodes idle.
+- **09-09 11:30 — new CelebA best:** aag77 = linear r32 bottleneck (aag61 ep400) + fresh critic **1.0** (0.5 was too weak for this generator:
+  critic never reached equilibrium): FID-10k 27.28 @ep406, **FID-50k 25.87**; collapses after ep408. aag78 (2.0) running. Rule of thumb:
+  the gain happens in the window where df≈1/gf≈0 — tune the weight per generator until that window appears, then take the mid checkpoint.
