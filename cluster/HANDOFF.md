@@ -501,3 +501,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-09 11:30 — new CelebA best:** aag77 = linear r32 bottleneck (aag61 ep400) + fresh critic **1.0** (0.5 was too weak for this generator:
   critic never reached equilibrium): FID-10k 27.28 @ep406, **FID-50k 25.87**; collapses after ep408. aag78 (2.0) running. Rule of thumb:
   the gain happens in the window where df≈1/gf≈0 — tune the weight per generator until that window appears, then take the mid checkpoint.
+- **09-09 12:15:** weight bracket on the r32 bottleneck generator: 0.5 none · 1.0 27.28 (FID-50k 25.87) · 2.0 28.55→collapse. Seed-1 repeat
+  of 1.0 (aag79): min 29.03 then collapse — 25.87 is seed-fragile, not a recipe. Reproducible best remains flat DINO + fresh 0.5 (27.45).
+  Next lever if pursued: stabilise the critic (lower critic LR / R1 / EMA critic) + eval every epoch to widen the productive window.
