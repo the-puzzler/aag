@@ -531,3 +531,7 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-09 23:00 — from scratch (interim, ep190/400):** aag95 (r32 + distributional critic **0.5** on from step 1, aag61 recipe) monotonic 25.12 @190 — already
   below plain aag61's endpoint (29.85 @400) and near the finetune record (24.84) at under half the schedule. aag94 (w1.0 from scratch) unstable: 108 @60, 133 @90, 73 @190 —
   1.0 is right for finetuning a converged generator, too strong while the generator is forming. Critic balanced in both (df 0.90–0.95).
+- **09-10 00:30 — from scratch FINAL (400 ep cosine 2e-4, r32, critic on from step 1; runs take ~4.5 h not 14):**
+  aag95 w0.5: monotonic to **23.60 @210 (best FID-10k of the project)**, then collapse from ep220 (38 → 57 → 138 @400). ep210 ≈ where the cosine LR passes 1e-4.
+  aag94 w1.0: never converged (108 @60, 133 @90, 57 @400). Weight 1.0 is for finetuning a converged generator only.
+  Reading: the critic game is stable at LR ≤ 5e-5 and unstable when LR ≥ ~1e-4 is held for long once the generator is near the anchors (finetunes overshoot at 1e-4, from-scratch collapses when the cosine reaches 1e-4 after ep200). Early high LR from scratch is fine because the generator is far from the anchors.
