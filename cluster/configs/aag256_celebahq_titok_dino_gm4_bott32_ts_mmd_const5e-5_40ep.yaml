@@ -1,0 +1,29 @@
+# CelebA-HQ 256: NON-adversarial two-sample loss (mmd in frozen DINO CLS space, finite-sample floor) between G(z_fresh) and G(z_assigned), r32 generator from aag61 ep400, constant 5e-5, 40 ep (user idea 2026-09-10). Compare aag92 (critic, same schedule: 24.84 / FID-50k 23.56).
+# User (2026-09-05): adversary goes on the generator, not the AE; pipeline order = plain generator first, then extras.
+name: aag256_celebahq_titok_dino_gm4_bott32_ts_mmd_const5e-5_40ep
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  TORCH_HOME: /mnt/shared/aag/torch_hub
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+  ASSIGN: /mnt/shared/aag/results_scale256/celebahq_titok/assign/assign_uncond_200k.pt
+  RESUME: /mnt/shared/aag/results_scale256/celebahq_titok/gen_uncond_200k_dino_gm4_bott32/checkpoints/gen_ep400.pt
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/celebahq256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: wait_assignment
+    cmd: python cluster/wait_for_file.py $ASSIGN --hours 1
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset celebahq256 --n 0 --out $D/celebahq256/fid_stats_train_28000.npz
+  - name: generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset celebahq256
+      --n-classes 0 --z-bottleneck 32 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 440 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.02 --eval-every 2
+      --ts-loss mmd --ts-weight 1.0
+      --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq_titok/gen_uncond_200k_dino_gm4_bott32_ts_mmd_const5e-5_40ep

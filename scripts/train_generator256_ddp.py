@@ -89,6 +89,16 @@ ap.add_argument("--fresh-gan-weight", type=float, default=0.0,
                      "the pairs give no supervision. Adaptive weight (adversarial grad = this fraction of the supervised grad at "
                      "the last conv) unless --fresh-gan-fixed; keep it weak relative to the supervised objective.")
 ap.add_argument("--fresh-gan-fixed", action="store_true", help="use --fresh-gan-weight as a fixed multiplier instead of x adaptive")
+ap.add_argument("--ts-loss", choices=["none", "mmd", "swd"], default="none",
+                help="NON-adversarial two-sample loss between G(z_fresh) and G(z_assigned) [detached] in frozen DINOv2 feature space "
+                     "(user idea 2026-09-10): 'mmd' = RBF-mixture MMD^2, 'swd' = sliced Wasserstein-2. Only the fresh branch gets gradient.")
+ap.add_argument("--ts-weight", type=float, default=1.0, help="two-sample loss weight (x adaptive unless --ts-fixed)")
+ap.add_argument("--ts-fixed", action="store_true", help="use --ts-weight as a fixed multiplier")
+ap.add_argument("--ts-floor", type=int, default=1, help="1: subtract the finite-sample floor = EMA of the same statistic between the current and the "
+                                                        "previous step's assigned batches (independent), clamp at 0 -> optimise only until indistinguishable")
+ap.add_argument("--ts-features", choices=["cls", "cls+patch"], default="cls", help="DINO features: CLS token, or CLS ++ mean patch token")
+ap.add_argument("--ts-slices", type=int, default=256, help="random directions for swd")
+ap.add_argument("--ts-gather", type=int, default=1, help="1: all_gather features across ranks (32 -> 256 samples per side) before the statistic")
 ap.add_argument("--fresh-critic-source", choices=["fresh", "assigned", "gen_assigned"], default="fresh",
                 help="what the fresh critic is TRAINED on as fakes: 'fresh' = G(z~N(0,I)) (default); 'assigned' = the supervised batch's "
                      "outputs G(z_i) only (user idea 2026-09-09: a generic realism boundary the generator is then pushed with at fresh z); "
@@ -221,14 +231,71 @@ class DinoFeatures(torch.nn.Module):
         with torch.no_grad():
             ct, pt = self(tgt)
         return F.mse_loss(cp, ct) + F.mse_loss(pp, pt)
-dino = DinoFeatures().to(dev) if a.dino_weight > 0 else None
+dino = DinoFeatures().to(dev) if (a.dino_weight > 0 or a.ts_loss != "none") else None
+
+class TwoSample:
+    """Two-sample statistic between fresh-z and assigned-z generations in frozen DINO feature space, with a finite-sample floor.
+    Features are standardised by an EMA of the assigned-batch mean/std. mmd: biased (V-statistic) MMD^2 with an RBF mixture whose
+    bandwidths follow the median pairwise distance of the assigned batch; swd: sliced W2^2 over --ts-slices random unit directions.
+    floor: EMA (0.99) of the same statistic between the current assigned batch and the previous step's assigned batch, i.e. two
+    independent samples of the SAME distribution at the same n -> what "indistinguishable" looks like at this batch size."""
+    def __init__(self):
+        self.mu = self.sd = None; self.prev = None; self.floor = None; self.calls = 0
+        self.gen = torch.Generator(device=dev).manual_seed(24680)  # identical on every rank -> identical statistic on every rank
+    def feats(self, x):
+        cls, patch = dino(x)
+        f = cls if a.ts_features == "cls" else torch.cat([cls, patch.mean(1)], 1)
+        return f.float()
+    def _std(self, f_assigned):
+        with torch.no_grad():
+            m, sd = f_assigned.mean(0), f_assigned.std(0) + 1e-6
+            if self.mu is None: self.mu, self.sd = m, sd
+            else: self.mu.lerp_(m, 0.01); self.sd.lerp_(sd, 0.01)
+    def stat(self, f1, f2):
+        if a.ts_loss == "mmd":
+            with torch.no_grad():
+                d2 = torch.cdist(f2, f2).pow(2); med = d2[d2 > 0].median().clamp_min(1e-6)
+            def k(x, y):
+                d = torch.cdist(x, y).pow(2)
+                return sum(torch.exp(-d / (med * s_)) for s_ in (0.5, 1.0, 2.0)) / 3
+            return k(f1, f1).mean() + k(f2, f2).mean() - 2 * k(f1, f2).mean()
+        dirs = F.normalize(torch.randn(f1.shape[1], a.ts_slices, device=f1.device, generator=self.gen), dim=0)
+        p1 = (f1 @ dirs).sort(0).values; p2 = (f2 @ dirs).sort(0).values
+        return (p1 - p2).pow(2).mean()
+    def __call__(self, pred_f, pred_assigned_detached):
+        ff = self.feats(pred_f)
+        with torch.no_grad():
+            fa = self.feats(pred_assigned_detached)
+        if a.ts_gather and world > 1:
+            import torch.distributed.nn.functional as dnf
+            ff = torch.cat(dnf.all_gather(ff), 0)
+            with torch.no_grad():
+                fa = torch.cat(dnf.all_gather(fa), 0)
+        with torch.autocast("cuda", enabled=False):
+            ff = ff.float(); fa = fa.float()
+            self._std(fa)
+            ff = (ff - self.mu) / self.sd; fa = (fa - self.mu) / self.sd
+            raw = self.stat(ff, fa)
+            fl = torch.zeros((), device=ff.device)
+            if a.ts_floor:
+                if self.prev is not None and self.prev.shape == fa.shape:
+                    with torch.no_grad():
+                        f0 = self.stat(fa, self.prev)
+                    self.floor = f0 if self.floor is None else self.floor.lerp(f0, 0.01)
+                self.prev = fa.detach()
+                if self.floor is not None: fl = self.floor
+        self.calls += 1
+        return (raw - fl).clamp_min(0), raw.detach(), fl
+ts = TwoSample() if a.ts_loss != "none" else None
 
 opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.99), weight_decay=a.wd)
 adv = a.gan_weight > 0
 fadv = a.fresh_gan_weight > 0
 disc = opt_d = fdisc = opt_fd = None
-if adv or fadv:
+if adv or fadv or ts is not None:
     from aag.discriminator import NLayerDiscriminator, paired_batch, paired_d_loss, paired_g_loss, adaptive_weight, hinge_d_loss, g_loss_from
+if ts is not None and not fadv:
+    fresh_gen = torch.Generator(device=dev).manual_seed(8765 + rank)
 if adv:
     disc = NLayerDiscriminator(6, a.gan_ndf, a.gan_layers).to(dev)
     opt_d = torch.optim.Adam(disc.parameters(), lr=a.gan_lr, betas=(0.5, 0.9))
@@ -294,6 +361,9 @@ if ddp:
         disc = torch.nn.parallel.DistributedDataParallel(disc, device_ids=[local])
     if fadv:
         fdisc = torch.nn.parallel.DistributedDataParallel(fdisc, device_ids=[local])
+if ts is not None:
+    log(f"two-sample loss on: {a.ts_loss} in DINO {a.ts_features} space, weight={a.ts_weight} ({'fixed' if a.ts_fixed else 'x adaptive'}), "
+        f"floor={'EMA of stat(assigned_t, assigned_t-1), clamp 0' if a.ts_floor else 'off'}, gather={bool(a.ts_gather)}; G(z_fresh) vs G(z_assigned).detach(), no real images, no critic")
 if fadv:
     log(f"fresh-z adversary on: weight={a.fresh_gan_weight} ({'fixed' if a.fresh_gan_fixed else 'x adaptive'}), critic ndf={a.fresh_gan_ndf} "
         f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; "
@@ -369,6 +439,7 @@ for epoch in range(start_epoch, a.epochs):
     run_dn = 0.0
     run_g = run_d = run_w = 0.0
     run_gf = run_df = run_wf = 0.0
+    run_ts = run_tf = run_tw = 0.0
     for i in range(steps_per_epoch):
         b = perm[i * a.batch:(i + 1) * a.batch]
         for pg in opt.param_groups:
@@ -395,12 +466,20 @@ for epoch in range(start_epoch, a.epochs):
                 g_adv = paired_g_loss(disc(pair).float(), lab)
             w = torch.tensor(a.gan_weight, device=dev) if a.gan_fixed else adaptive_weight(loss, g_adv, raw.out.weight) * a.gan_weight
             total = total + w * g_adv
-        if fadv:
+        if fadv or ts is not None:
             # fresh-z term: samples from N(0,I) (labels drawn from the batch when conditional) judged by an
             # unpaired critic against the real batch -- supervision exactly where the pairs give none
             zf = torch.randn(b.numel(), dim_z, device=dev, generator=fresh_gen)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 pred_f = fwd(zf, y[b] if n_classes else None).float().clamp(-1, 1)
+        if ts is not None:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                ts_loss, ts_raw, ts_fl = ts(pred_f, pred.detach().clamp(-1, 1))
+            ts_loss = ts_loss.float()
+            wt = torch.tensor(a.ts_weight, device=dev) if a.ts_fixed else (adaptive_weight(loss, ts_loss, raw.out.weight) * a.ts_weight if ts_loss.item() > 0 else torch.zeros((), device=dev))
+            total = total + wt * ts_loss
+        if fadv:
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 # score fakes inside the same real||fake batch the critic is trained on: the critic has
                 # BatchNorm, so a fake-only batch would be normalised with different statistics and the
                 # generator would receive a critic signal unrelated to the one the critic was trained with
@@ -437,11 +516,14 @@ for epoch in range(start_epoch, a.epochs):
                 pe.lerp_(pm, 1 - a.ema)
         gstep += 1
         run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel(); run_dn += dn.item() * b.numel()
+        if ts is not None:
+            run_ts += float(ts_raw) * b.numel(); run_tf += float(ts_fl) * b.numel(); run_tw += float(wt) * b.numel()
         if is_main and gstep % a.log_every == 0:
             el = time.time() - t0
             print(f"  ep {epoch + 1} step {gstep - sched0:,}/{total_steps:,}  mse {run_mse / run_n:.5f}  lpips {run_lp / run_n:.4f}  "
                   + (f"g {run_g / run_n:.3f} d {run_d / run_n:.3f} w {run_w / run_n:.3g}  " if adv else "")
-                  + (f"gf {run_gf / run_n:.3f} df {run_df / run_n:.3f} wf {run_wf / run_n:.3g}  " if fadv else "") +
+                  + (f"gf {run_gf / run_n:.3f} df {run_df / run_n:.3f} wf {run_wf / run_n:.3g}  " if fadv else "")
+                  + (f"ts {run_ts / run_n:.4g} fl {run_tf / run_n:.4g} wt {run_tw / run_n:.3g}  " if ts is not None else "") +
                   f"lr {lr_at(gstep):.2e}  {(gstep - gstep_run0) * a.batch * world / el:,.0f} img/s  "
                   f"eta {(total_steps - (gstep - sched0)) * el / max(gstep - gstep_run0, 1) / 3600:.1f} h",
                   flush=True)
