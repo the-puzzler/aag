@@ -545,3 +545,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Mechanism: multiplier = ||∇sup||/||∇adv|| × w; as the generator converges on the anchors ∇sup shrinks → push on the fresh branch vanishes → fresh branch drifts → critic wins → ∇adv grows → multiplier shrinks further (positive feedback).
   Finetunes from a converged generator are stable because ∇sup is already small and steady. aag101 (fixed 0.05) is the test: 32.1 @120, df 1.00.
 - **09-10 05:30:** aag101 (from scratch, FIXED multiplier 0.05) passed the collapse zone: 24.06 @230, **22.96 @240 (best FID-10k)**, 23.97 @250; critic drifting toward winning (df 0.83) but the push stays on. Confirms the adaptive-weight feedback as the cause. aag103 (ImageNet, fixed 0.08) queued on the freed node.
+- **09-10 06:30:** aag102 (big critic 4L/ndf128, constant 5e-5, **160 ep** from aag61 ep400): FID-10k 20.02 @560 still descending, no collapse in 140k steps;
+  **final FID-50k 18.89 — first sub-20, stable last checkpoint.** Critic drifting toward winning (df 0.60) but the multiplier stays ~0.012 on the converged generator.
+  aag104 = continue from aag102 ep560 for 160 more epochs (critic state resumes). Ladder (standard critic) 20/40/80 ep: 25.56/23.56/22.58; big critic 40/160 ep: 22.93/18.89.
