@@ -88,6 +88,9 @@ ap.add_argument("--fresh-gan-weight", type=float, default=0.0,
                      "the pairs give no supervision. Adaptive weight (adversarial grad = this fraction of the supervised grad at "
                      "the last conv) unless --fresh-gan-fixed; keep it weak relative to the supervised objective.")
 ap.add_argument("--fresh-gan-fixed", action="store_true", help="use --fresh-gan-weight as a fixed multiplier instead of x adaptive")
+ap.add_argument("--fresh-critic-source", choices=["fresh", "assigned"], default="fresh",
+                help="what the fresh critic is TRAINED on as fakes: 'fresh' = G(z~N(0,I)) (default); 'assigned' = the supervised batch's "
+                     "outputs G(z_i) only (user idea 2026-09-09: a generic realism boundary the generator is then pushed with at fresh z)")
 ap.add_argument("--fresh-gan-layers", type=int, default=3)
 ap.add_argument("--fresh-gan-ndf", type=int, default=64)
 ap.add_argument("--gan-weight", type=float, default=0.0, help="0 = off; scales the adaptively balanced adversarial term")
@@ -290,7 +293,8 @@ if ddp:
         fdisc = torch.nn.parallel.DistributedDataParallel(fdisc, device_ids=[local])
 if fadv:
     log(f"fresh-z adversary on: weight={a.fresh_gan_weight} ({'fixed' if a.fresh_gan_fixed else 'x adaptive'}), critic ndf={a.fresh_gan_ndf} "
-        f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; real batch vs G(N(0,I)) batch")
+        f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; "
+        f"critic trained on real vs {'G(z_assigned) [supervised batch]' if a.fresh_critic_source == 'assigned' else 'G(N(0,I))'}; generator pushed at fresh z")
 if adv:
     log(f"pairwise adversary on: weight={a.gan_weight} ({'fixed' if a.gan_fixed else 'x adaptive'}), critic ndf={a.gan_ndf} "
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
@@ -415,8 +419,9 @@ for epoch in range(start_epoch, a.epochs):
         if fadv:
             # ONE critic forward on real||fake: under DDP every forward re-broadcasts the BatchNorm buffers
             # in place, so two forwards before one backward corrupt the saved tensors of the first
+            fake_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "assigned" else pred_f.detach()
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                lg = fdisc(torch.cat([tgt, pred_f.detach()], 0)).float()
+                lg = fdisc(torch.cat([tgt, fake_d], 0)).float()
             d_loss_f = hinge_d_loss(lg[: tgt.shape[0]], lg[tgt.shape[0]:])
             opt_fd.zero_grad(set_to_none=True)
             d_loss_f.backward()
