@@ -495,3 +495,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   (aag72) 35.7 — nonlinear worse at every rank. Decomposition (FID@5k assigned/fresh): flat 10.0/34.4, linear r32 **7.7/30.5**, nonlinear
   10–13/36–39 — linear bottleneck better on both targets, nonlinear worse on both (Gaussianity of the code is preserved only by a linear
   map). aag73 (4×1024 @ r32) finishing. All three nodes otherwise idle; user considering direction.
+- **09-09 10:30:** AAG2 400 blocks (aag74, Gaussian-indistinguishable) 42.65 best / FID-50k 41.84 vs floor 38.93 — fully Gaussian costs ~3.
+  User-requested bottleneck × fresh critic: linear r32 + fresh (aag75) 29.85 → 29.64 (no gain); nonlinear 4×1024@r32 + fresh (aag76)
+  34.3 → 29.96. Bottleneck family converges on ~29.6–30 regardless; flat DINO + fresh critic remains best (28.58 / 27.45). All nodes idle.
