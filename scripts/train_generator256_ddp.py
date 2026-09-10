@@ -96,6 +96,8 @@ ap.add_argument("--ts-weight", type=float, default=1.0, help="two-sample loss we
 ap.add_argument("--ts-fixed", action="store_true", help="use --ts-weight as a fixed multiplier")
 ap.add_argument("--ts-floor", type=int, default=1, help="1: subtract the finite-sample floor = EMA of the same statistic between the current and the "
                                                         "previous step's assigned batches (independent), clamp at 0 -> optimise only until indistinguishable")
+ap.add_argument("--ts-floor-mult", type=float, default=1.0, help="stop margin: clamp the loss at 0 once stat < mult x floor (fresh-vs-assigned can never reach the "
+                                                                 "assigned-vs-assigned floor exactly: 28k discrete anchors vs a continuum)")
 ap.add_argument("--ts-features", choices=["cls", "cls+patch"], default="cls", help="DINO features: CLS token, or CLS ++ mean patch token")
 ap.add_argument("--ts-slices", type=int, default=256, help="random directions for swd")
 ap.add_argument("--ts-gather", type=int, default=1, help="1: all_gather features across ranks (32 -> 256 samples per side) before the statistic")
@@ -287,7 +289,7 @@ class TwoSample:
                         f0 = self.stat(fa, self.prev)
                     self.floor = f0 if self.floor is None else self.floor.lerp(f0, 0.01)
                 self.prev = fa.detach()
-                if self.floor is not None: fl = self.floor
+                if self.floor is not None: fl = self.floor * a.ts_floor_mult
         self.calls += 1
         return (raw - fl).clamp_min(0), raw.detach(), fl
 ts = TwoSample() if a.ts_loss != "none" else None
@@ -367,7 +369,7 @@ if ddp:
         fdisc = torch.nn.parallel.DistributedDataParallel(fdisc, device_ids=[local])
 if ts is not None:
     log(f"two-sample loss on: {a.ts_loss} in DINO {a.ts_features} space, weight={a.ts_weight} ({'fixed' if a.ts_fixed else 'x adaptive'}), "
-        f"floor={'EMA of stat(assigned_t, assigned_t-1), clamp 0' if a.ts_floor else 'off'}, gather={bool(a.ts_gather)}; G(z_fresh) vs G(z_assigned).detach(), no real images, no critic")
+        f"floor={f'{a.ts_floor_mult}x EMA of stat(assigned_t, assigned_t-1), clamp 0' if a.ts_floor else 'off'}, gather={bool(a.ts_gather)}; G(z_fresh) vs G(z_assigned).detach(), no real images, no critic")
 if fadv:
     log(f"fresh-z adversary on: weight={a.fresh_gan_weight} ({'fixed' if a.fresh_gan_fixed else 'x adaptive'}), critic ndf={a.fresh_gan_ndf} "
         f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; "
