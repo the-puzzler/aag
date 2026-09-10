@@ -580,5 +580,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-11 00:30:** aag116 (MMD CLS++patch fixed 0.5, stop margin 2x floor, 160 ep): min 21.19 @440–448 then drift to 23.20 @560 — identical to the unmargined aag114 although the clamp was engaging.
   The late drift is NOT the two-sample push: with the MMD clamped, continued supervised training at constant 5e-5 on a converged generator memorises the anchors further (off-target degradation) and nothing counteracts it; the critic kept improving because it never stops finding differences. aag119 = plain control (no fresh term) to confirm.
   Recipe stands: two-sample loss for ~40 ep then STOP (or a finer/larger statistic: aag117/118 doubled batch).
-- **09-11 07:00:** aag118 (MMD CLS++patch fixed 0.5, two-sample batch DOUBLED via `--ts-fresh-mult 2`, 40 ep): monotonic to **20.93 @440**, still descending (aag112 single batch: 21.17). Floor halves (0.0024), stat at 3.2x floor.
+- **09-11 07:00:** aag118 (MMD CLS++patch fixed 0.5, two-sample batch DOUBLED via `--ts-fresh-mult 2`, 40 ep): monotonic to **20.93 @440 / FID-50k 20.01**, still descending (aag112 single batch: 21.17 / 20.17). Floor halves (0.0024), stat at 3.2x floor.
   First attempt hung (fresh side k x rows vs assigned rows on the ragged last batch) → truncate the two sides separately. aag117 = ImageNet version.
