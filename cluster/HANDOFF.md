@@ -599,3 +599,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-11 17:30 — factorial cells:** r16 x none: 31.2 → 31.89 @560, FID-50k 31.10. **flat x critic (matched, from flat ep400): 25.34 @560 (min 24.71), FID-50k 24.14** vs r32 x critic 18.89 / 18.12 — a ~5.5 FID-50k bottleneck gap under fully matched conditions.
 - **09-11 18:30:** factorial flat x MMD (160 ep): FID-50k 27.34 at the end (see FID-10k curve in the job log; MMD runs drift after ~40 ep by design of the matched schedule).
 - **09-11 19:30:** factorial r16 x critic (160 ep): **FID-50k 20.73** (flat 24.14, r32 18.89/18.12). flat x MMD FID-10k min 23.24 @448 then drift to 28.20 @560.
+- **09-11 20:30:** factorial r16 x MMD (160 ep): monotonic to 23.17 @560, **no drift** (flat and r32 MMD drift after ~40 ep); FID-50k 22.45. r16 x critic 21.46 @560 / FID-50k 20.73.
