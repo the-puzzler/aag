@@ -276,8 +276,8 @@ class TwoSample:
             # ranks can hold a PARTIAL last batch of different sizes (per-rank splits are not multiples of the batch);
             # all_gather needs equal shapes, so truncate every rank to the common minimum first (identical decision on all ranks)
             import torch.distributed.nn.functional as dnf
-            n_min = torch.tensor([ff.shape[0]], device=ff.device); dist.all_reduce(n_min, op=dist.ReduceOp.MIN); n_min = int(n_min.item())
-            ff, fa = ff[:n_min], fa[:n_min]
+            n_min = torch.tensor([fa.shape[0]], device=ff.device); dist.all_reduce(n_min, op=dist.ReduceOp.MIN); n_min = int(n_min.item())
+            ff, fa = ff[: n_min * a.ts_fresh_mult], fa[:n_min]  # fresh side holds k x the assigned rows
             ff = torch.cat(dnf.all_gather(ff), 0)
             with torch.no_grad():
                 fa = torch.cat(dnf.all_gather(fa), 0)
