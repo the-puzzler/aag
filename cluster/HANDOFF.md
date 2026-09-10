@@ -586,3 +586,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   (aag114/116) IS the two-sample term: past ~40 ep it over-optimises the DINO-space proxy (FID up while the stat sits in its band), margin or not. Correction of the 00:30 reading.
   Two-sample recipe = ~40 ep then stop; the adaptive critic is what keeps improving over long schedules (ladder to 16.79). Batch-size axis (aag118 x2: 20.01) still open (aag120 x4).
 - **09-11 09:30:** aag115 (ImageNet CLS-MMD continued 8 → 14): 33.5 / 32.7 / 31.9 / 31.8 / 31.5 / **30.89 @14 / FID-50k 28.35**, stat at floor throughout, no collapse. Superseded by CLS++patch (29.9 in 4 ep).
+- **09-11 10:30:** aag120 (two-sample batch x4, 1024 vs 1024): 20.92 @440 = x2 (20.93); floor 0.0011, stat 5.6x floor. The batch axis saturates at x2 for the 40-ep recipe. aag122 = seed-1 repeat of aag118 (x2).
