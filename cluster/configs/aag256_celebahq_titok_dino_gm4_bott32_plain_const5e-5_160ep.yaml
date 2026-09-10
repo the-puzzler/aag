@@ -25,5 +25,4 @@ stages:
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset celebahq256
       --n-classes 0 --z-bottleneck 32 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 560 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.02 --eval-every 2
-     
       --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq_titok/gen_uncond_200k_dino_gm4_bott32_plain_const5e-5_160ep
