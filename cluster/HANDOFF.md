@@ -593,3 +593,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Note: all earlier FLAT runs (aag53/80/82/84/85/87/97/121) started from flat ep160, not ep400 — aag121 (flat + big critic from ep160, 160 ep) is a supplementary point, not a factorial cell.
   After the 160-ep grid: extend the four critic cells to 320 ep to match aag104 (16.79).
 - **09-11 12:30:** aag122 (seed-1 repeat of aag118, MMD CLS++patch fixed 0.5 x2, 40 ep): 21.07 @440 / FID-50k 20.16 (seed 0: 20.93 / 20.01) — reproduces.
+- **09-11 13:30:** aag121 (FLAT from ep160 + big critic 1.0, constant 5e-5, 160 ep): 23.29 @320, still slowly descending; critic winning (df 0.39). r32 on the same schedule: 20.02 / 19.32 (aag102/105). Supplementary point; the matched flat cell (from ep400) is aag124.
