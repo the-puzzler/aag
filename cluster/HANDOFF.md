@@ -572,3 +572,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 17:00 — ImageNet MMD (aag110, aag57 ep4 + `--ts-loss mmd` adaptive 1.0, constant 5e-5):** FID-10k **39.39 @ep5 / FID-50k 36.67** (critic 47.2 / 44.76, plain 91.4 / 88.21); MMD 0.0044 vs floor 0.0048 → clamp engaged after one epoch (indistinguishable in DINO CLS space). 3 epochs still running.
 - **09-10 18:30:** aag112 (MMD on CLS++mean-patch, fixed 0.5, 40 ep): monotonic to **21.17 @440 / FID-50k 20.17**, still descending, stat 2.3x floor (not saturated) — finer features beat CLS-only (21.84 fixed / 21.47 adaptive min).
   aag114 continues it to ep560. aag113 = same features on ImageNet.
+- **09-10 19:30:** aag110 (ImageNet CLS-MMD) finished all 4 epochs WITHOUT collapse — first stable ImageNet finetune: 39.4 / 34.3 / 33.0 / **32.77 @8**, stat at floor (clamp on, push ~off). FID-50k @8 running; aag115 continues to ep14.
