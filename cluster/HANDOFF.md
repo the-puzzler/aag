@@ -585,3 +585,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-11 08:30 — plain control (aag119, supervised only, constant 5e-5, 160 ep): 29.80 → 30.29.** Supervised-only training drifts only +0.5, so the +2 late drift in the long two-sample runs
   (aag114/116) IS the two-sample term: past ~40 ep it over-optimises the DINO-space proxy (FID up while the stat sits in its band), margin or not. Correction of the 00:30 reading.
   Two-sample recipe = ~40 ep then stop; the adaptive critic is what keeps improving over long schedules (ladder to 16.79). Batch-size axis (aag118 x2: 20.01) still open (aag120 x4).
+- **09-11 09:30:** aag115 (ImageNet CLS-MMD continued 8 → 14): 33.5 / 32.7 / 31.9 / 31.8 / 31.5 / **30.89 @14**, stat at floor throughout, no collapse. Superseded by CLS++patch (29.9 in 4 ep).
