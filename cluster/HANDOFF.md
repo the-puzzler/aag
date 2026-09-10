@@ -587,3 +587,8 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Two-sample recipe = ~40 ep then stop; the adaptive critic is what keeps improving over long schedules (ladder to 16.79). Batch-size axis (aag118 x2: 20.01) still open (aag120 x4).
 - **09-11 09:30:** aag115 (ImageNet CLS-MMD continued 8 → 14): 33.5 / 32.7 / 31.9 / 31.8 / 31.5 / **30.89 @14 / FID-50k 28.35**, stat at floor throughout, no collapse. Superseded by CLS++patch (29.9 in 4 ep).
 - **09-11 10:30:** aag120 (two-sample batch x4, 1024 vs 1024): 20.92 @440 / FID-50k 19.95 = x2 (20.93 / 20.01); floor 0.0011, stat 5.6x floor. The batch axis saturates at x2 for the 40-ep recipe. aag122 = seed-1 repeat of aag118 (x2).
+- **09-11 11:30 — MATCHED FACTORIAL (user request):** {flat, r16, r32, r64} x {none, MMD, critic}, all from each generator's own plain **ep400** (identical 400-ep DINO-0.02 recipe,
+  lr 2e-4), finetuned at constant 5e-5 for **160 ep** (matched steps). none = supervised only; critic = big distributional critic (4L/ndf128, w1.0 adaptive); MMD = CLS++patch, fixed 0.5, batch x2.
+  Existing matched cells: r32 x none = aag119 (30.29 end), r32 x critic = aag102 (20.02 / FID-50k 18.89; seed aag105 19.32 / 18.12). Missing 10 cells = aag123–aag132 (chain51, jobs listed in jobs tmp factorial_jobs.txt; configs `aag256_celebahq_titok_dino_gm4_fact_<gen>_<term>_160ep.yaml`).
+  Note: all earlier FLAT runs (aag53/80/82/84/85/87/97/121) started from flat ep160, not ep400 — aag121 (flat + big critic from ep160, 160 ep) is a supplementary point, not a factorial cell.
+  After the 160-ep grid: extend the four critic cells to 320 ep to match aag104 (16.79).
