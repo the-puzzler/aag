@@ -562,3 +562,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Slight uptick over the last 12 ep (21.47 → 21.76). First aag106 attempt hung: partial last batches differ across ranks → all_gather deadlock; fixed by truncating to the all_reduce(MIN) count.
   aag107 (SWD) running; queued aag109 (MMD 160 ep), aag110 (ImageNet MMD). Image tag for ts: jobs tmp ts_image_tag.
 - **09-10 13:00:** aag107 (SWD, same recipe): 21.56 @426 / 21.91 @440, final FID-50k 21.07 — same as MMD (21.47 / 21.76 / 20.93), same mild late uptick; SWD stat 0.131 → 0.033 vs floor 0.0235 (1.4x). Statistic choice is secondary.
+- **09-10 13:30:** aag103 (ImageNet, distributional critic FIXED 0.08, constant 5e-5, 6 ep): 50.5 / 49.0 / 52.1 / 67.0 / 69.3 / 62.5 @5–10 — no better than adaptive (aag98 47.2 @5) and degrades anyway.
+  Fixed multiplier is not the ImageNet fix either. aag110 (ImageNet MMD) submitted next.
