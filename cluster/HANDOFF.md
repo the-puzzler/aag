@@ -573,3 +573,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 18:30:** aag112 (MMD on CLS++mean-patch, fixed 0.5, 40 ep): monotonic to **21.17 @440 / FID-50k 20.17**, still descending, stat 2.3x floor (not saturated) — finer features beat CLS-only (21.84 fixed / 21.47 adaptive min).
   aag114 continues it to ep560. aag113 = same features on ImageNet.
 - **09-10 19:30:** aag110 (ImageNet CLS-MMD) finished all 4 epochs WITHOUT collapse — first stable ImageNet finetune: 39.4 / 34.3 / 33.0 / **32.77 @8**, stat at floor (clamp on, push ~off). FID-50k @8 running; aag115 continues to ep14.
+- **09-10 20:30 — two-sample loss over-optimises past ~40 ep:** aag114 (aag112 continued 440 → 560): FID-10k 21.12 @446 → 23.33 @560 monotonically UP while the MMD stat kept falling (0.0105 → 0.0079).
+  The floor-stop never engaged: fresh-vs-assigned cannot reach the assigned-vs-assigned floor (28k discrete anchors vs a continuum) → the clamp needs a margin. New flag `--ts-floor-mult` (aag116: 2x, 160 ep).
+  Practical recipe today: MMD CLS++patch fixed 0.5, 40 ep → FID-50k 20.17, taken at the end (no picking) — but do not run it longer without the margin.
