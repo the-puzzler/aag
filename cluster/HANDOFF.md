@@ -568,3 +568,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 16:00:** aag109 (MMD adaptive, 160 ep): 21.51 @424 then slow drift to ~21.9 — adaptive weight climbs to 3.7 and renormalises the push to full supervised strength at the floor (noise push).
   aag111 (MMD FIXED 0.5, 40 ep): monotonic to 21.84 @440, flat, no drift — but same level. The ~21.5–21.8 plateau is the statistic's resolution (CLS-only MMD stuck at 1.4–2x floor), not the weighting.
   aag112 = MMD fixed 0.5 on CLS++mean-patch features. Critic ladder saturated at 16.79 (320 ep); MMD is faster at 40 ep (20.93 vs 23.56) but does not improve with epochs.
+- **09-10 16:30:** aag109 (MMD adaptive, 160 ep) final: 21.49 @428 then 21.8–22.0 flat to 560. CLS-token MMD saturates at ~21.5–21.9 regardless of schedule/weighting. Not re-evaluated at 50k.
