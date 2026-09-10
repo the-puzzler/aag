@@ -610,6 +610,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   | gen | none | MMD | critic |
   | flat | 33.81 | 27.34 (min 23.2 @448) | 24.14 |
   | r16 | 31.10 | 22.45 (no drift) | 20.73 |
-  | r32 | aag119 (10k 30.29; 50k pending) | 22.58 (min 21.0 @438) | 18.89 / 18.12 (2 seeds) |
+  | r32 | 28.92 | 22.58 (min 21.0 @438) | 18.89 / 18.12 (2 seeds) |
   | r64 | 31.14 | 23.09 (min 21.6 @450) | **16.60**, still descending |
   Reading: (1) the bottleneck advantage survives fully matched off-anchor finetuning and GROWS with it (plain spread flat→best 2.7; critic spread 7.5); (2) under the critic the rank optimum moves up (r64 > r32 > r16 > flat) whereas plain r32 ≈ r64 ≈ r16; (3) MMD ≈ −8 to −9 at its minimum for every rank but only r16 holds it; (4) both terms are complementary to compression, not substitutes: flat+critic (24.1) < r64 plain (31.1) but r64+critic (16.6) ≪ both.
