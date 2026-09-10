@@ -576,3 +576,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 20:30 — two-sample loss over-optimises past ~40 ep:** aag114 (aag112 continued 440 → 560): FID-10k 21.12 @446 → 23.33 @560 monotonically UP while the MMD stat kept falling (0.0105 → 0.0079).
   The floor-stop never engaged: fresh-vs-assigned cannot reach the assigned-vs-assigned floor (28k discrete anchors vs a continuum) → the clamp needs a margin. New flag `--ts-floor-mult` (aag116: 2x, 160 ep).
   Practical recipe today: MMD CLS++patch fixed 0.5, 40 ep → FID-50k 20.17, taken at the end (no picking) — but do not run it longer without the margin.
+- **09-10 22:00:** aag113 (ImageNet, MMD CLS++patch fixed 0.5, 4 ep): 34.0 / **29.87 @6** / 29.84 / 29.89 @8 — stat hit the floor at ep6, clamp engaged, FID HELD FLAT for 2 epochs (the intended stop-at-indistinguishable behaviour, first clean instance). CLS-only was 32.77 @8. FID-50k @8 running.
