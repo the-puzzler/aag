@@ -601,3 +601,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-11 19:30:** factorial r16 x critic (160 ep): **FID-50k 20.73** (flat 24.14, r32 18.89/18.12). flat x MMD FID-10k min 23.24 @448 then drift to 28.20 @560.
 - **09-11 20:30:** factorial r16 x MMD (160 ep): monotonic to 23.17 @560, **no drift** (flat and r32 MMD drift after ~40 ep); FID-50k 22.45. r16 x critic 21.46 @560 / FID-50k 20.73.
 - **09-11 21:00:** factorial r32 x MMD (160 ep, clean single run): FID-50k 22.58 at the end (see min in the log line below).
+- **09-11 22:00:** factorial r64 x none: 31.4 → 32.26 @560, FID-50k 31.14. r32 x MMD FID-10k min 20.96 @438 then drift to 23.62 @560 (FID-50k 22.58 at the end).
