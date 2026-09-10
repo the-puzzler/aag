@@ -592,4 +592,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   Existing matched cells: r32 x none = aag119 (30.29 end), r32 x critic = aag102 (20.02 / FID-50k 18.89; seed aag105 19.32 / 18.12). Missing 10 cells = aag123–aag132 (chain51, jobs listed in jobs tmp factorial_jobs.txt; configs `aag256_celebahq_titok_dino_gm4_fact_<gen>_<term>_160ep.yaml`).
   Note: all earlier FLAT runs (aag53/80/82/84/85/87/97/121) started from flat ep160, not ep400 — aag121 (flat + big critic from ep160, 160 ep) is a supplementary point, not a factorial cell.
   After the 160-ep grid: extend the four critic cells to 320 ep to match aag104 (16.79).
-- **09-11 12:30:** aag122 (seed-1 repeat of aag118, MMD CLS++patch fixed 0.5 x2, 40 ep): 21.07 @440 (seed 0: 20.93) — reproduces.
+- **09-11 12:30:** aag122 (seed-1 repeat of aag118, MMD CLS++patch fixed 0.5 x2, 40 ep): 21.07 @440 / FID-50k 20.16 (seed 0: 20.93 / 20.01) — reproduces.
