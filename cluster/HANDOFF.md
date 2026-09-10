@@ -564,3 +564,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 13:00:** aag107 (SWD, same recipe): 21.56 @426 / 21.91 @440, final FID-50k 21.07 — same as MMD (21.47 / 21.76 / 20.93), same mild late uptick; SWD stat 0.131 → 0.033 vs floor 0.0235 (1.4x). Statistic choice is secondary.
 - **09-10 13:30:** aag103 (ImageNet, distributional critic FIXED 0.08, constant 5e-5, 6 ep): 50.5 / 49.0 / 52.1 / 67.0 / 69.3 / 62.5 @5–10 — no better than adaptive (aag98 47.2 @5) and degrades anyway.
   Fixed multiplier is not the ImageNet fix either. aag110 (ImageNet MMD) submitted next.
+- **09-10 14:30:** aag108 (critic run continued 720 → 880): plateau 17.7–18.7, ends 17.93 (= aag104's 17.86). **The big-critic ladder saturates at ~17.9 FID-10k / 16.79 FID-50k after 320 ep**; critic winning (df 0.42). Not re-evaluated at 50k.
