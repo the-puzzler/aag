@@ -1,6 +1,6 @@
 # SEQUENTIAL (user request 2026-09-12): r32 -- 40 ep of MMD (CLS++patch fixed 0.5 x2, checkpoint ep440 of gen_uncond_200k_dino_gm4_bott32_ts_mmd_patch_fixed0.5_m2_const5e-5_40ep) THEN the big distributional critic (4L/128, w1.0 adaptive) for 160 ep at constant 5e-5. Compare with aag102/105 (r32 x critic from plain, 160 ep).
 # User (2026-09-05): adversary goes on the generator, not the AE; pipeline order = plain generator first, then extras.
-name: aag256_celebahq_titok_dino_gm4_bott32_fresh_short_const5e-5_160ep_bigD_dgen
+name: aag256_celebahq_titok_dino_gm4_seq_r32_mmd40_critic160
 env:
   AAG_HF_ROOT: /mnt/shared/aag/hf
   HF_HOME: /mnt/shared/aag/hf_home
