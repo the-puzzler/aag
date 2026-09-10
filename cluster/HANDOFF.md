@@ -604,3 +604,5 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-11 22:00:** factorial r64 x none: 31.4 → 32.26 @560, FID-50k 31.14. r32 x MMD FID-10k min 20.96 @438 then drift to 23.62 @560 (FID-50k 22.58 at the end).
 - **09-11 23:00 — factorial r64 x critic (160 ep): 17.73 @560 still descending steeply, FID-50k 16.60 — beats r32 x critic (18.89/18.12) at matched steps, and matches aag104's 320-ep r32 record (16.79) in half the epochs.**
   Critic column: flat 24.14 · r16 20.73 · r32 18.89/18.12 · r64 16.60. Plain column: 33.81 · 31.10 · ~30.3 · 31.14. The plain rank optimum (r32) does NOT carry over under off-anchor supervision — the wider code benefits more from the critic.
+- **09-11 23:30:** 320-ep extensions of the critic cells: aag133 (r64), aag134 (flat), aag135 (r16, chained); r32 @320 = aag104 (16.79). Auto FID-50k → scratch ckpts/factorial320_fid50k.out.
+  Next rank: plain r128 400-ep generator (aag136, chained) → then r128 x critic. MMD column endpoint is drift-dominated for flat/r32 (report min too); r16 x MMD did not drift.
