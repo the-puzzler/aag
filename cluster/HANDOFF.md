@@ -565,3 +565,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-10 13:30:** aag103 (ImageNet, distributional critic FIXED 0.08, constant 5e-5, 6 ep): 50.5 / 49.0 / 52.1 / 67.0 / 69.3 / 62.5 @5–10 — no better than adaptive (aag98 47.2 @5) and degrades anyway.
   Fixed multiplier is not the ImageNet fix either. aag110 (ImageNet MMD) submitted next.
 - **09-10 14:30:** aag108 (critic run continued 720 → 880): plateau 17.7–18.7, ends 17.93 (= aag104's 17.86). **The big-critic ladder saturates at ~17.9 FID-10k / 16.79 FID-50k after 320 ep**; critic winning (df 0.42). Not re-evaluated at 50k.
+- **09-10 16:00:** aag109 (MMD adaptive, 160 ep): 21.51 @424 then slow drift to ~21.9 — adaptive weight climbs to 3.7 and renormalises the push to full supervised strength at the floor (noise push).
+  aag111 (MMD FIXED 0.5, 40 ep): monotonic to 21.84 @440, flat, no drift — but same level. The ~21.5–21.8 plateau is the statistic's resolution (CLS-only MMD stuck at 1.4–2x floor), not the weighting.
+  aag112 = MMD fixed 0.5 on CLS++mean-patch features. Critic ladder saturated at 16.79 (320 ep); MMD is faster at 40 ep (20.93 vs 23.56) but does not improve with epochs.
