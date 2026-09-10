@@ -561,3 +561,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   FID-10k **21.47 @428** / 21.76 @440, **final FID-50k 20.93** vs the critic on the identical recipe 24.84 / 23.56 (aag92). No adversary, no critic. MMD fell 0.0355 → 0.0075 with floor 0.0048 (7.4x → 1.5x floor; clamp never engaged).
   Slight uptick over the last 12 ep (21.47 → 21.76). First aag106 attempt hung: partial last batches differ across ranks → all_gather deadlock; fixed by truncating to the all_reduce(MIN) count.
   aag107 (SWD) running; queued aag109 (MMD 160 ep), aag110 (ImageNet MMD). Image tag for ts: jobs tmp ts_image_tag.
+- **09-10 13:00:** aag107 (SWD, same recipe): 21.56 @426 / 21.91 @440 — same as MMD (21.47 / 21.76), same mild late uptick; SWD stat 0.131 → 0.033 vs floor 0.0235 (1.4x). Statistic choice is secondary.
