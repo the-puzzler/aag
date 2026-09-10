@@ -558,6 +558,6 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
   aag106 (MMD) running, aag107 (SWD) queued; same recipe as aag92 (r32, constant 5e-5, 40 ep) for a direct comparison with the critic (24.84 / 23.56).
 - **09-10 10:30:** aag105 (seed-1 repeat of aag102, big critic, 160 ep): 19.32 @560 (seed 0: 20.02), monotonic; **final FID-50k 18.12** (seed 0: 18.89) — reproduces within ~0.8.
 - **09-10 12:00 — MMD two-sample loss WORKS (aag106):** r32, constant 5e-5, 40 ep, `--ts-loss mmd` (DINO CLS, RBF mixture, 256 vs 256 gathered, floor = EMA stat(assigned_t, assigned_t−1)):
-  FID-10k **21.47 @428** / 21.76 @440 vs the critic on the identical recipe 24.84 (aag92). No adversary, no critic. MMD fell 0.0355 → 0.0075 with floor 0.0048 (7.4x → 1.5x floor; clamp never engaged).
+  FID-10k **21.47 @428** / 21.76 @440, **final FID-50k 20.93** vs the critic on the identical recipe 24.84 / 23.56 (aag92). No adversary, no critic. MMD fell 0.0355 → 0.0075 with floor 0.0048 (7.4x → 1.5x floor; clamp never engaged).
   Slight uptick over the last 12 ep (21.47 → 21.76). First aag106 attempt hung: partial last batches differ across ranks → all_gather deadlock; fixed by truncating to the all_reduce(MIN) count.
   aag107 (SWD) running; queued aag109 (MMD 160 ep), aag110 (ImageNet MMD). Image tag for ts: jobs tmp ts_image_tag.
