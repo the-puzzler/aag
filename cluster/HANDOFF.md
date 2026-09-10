@@ -616,3 +616,4 @@ ImageNet: TiTok d=512 300k hierarchy assignment running locally (54 step/s; A->A
 - **09-12 01:30 — node budget → 1 (user).** Deleted aag134 (flat critic → 320) and aag135 (r16 critic → 320); resumable from `..._fact_{flat,r16}_critic_160ep/checkpoints/gen_ep560.pt`. Kept aag133 (r64 → 320).
   One-node queue (chain55): aag136 plain r128 (400 ep) → aag139 r128 x critic (160) → aag140 plain r256 → aag141 r256 x critic → aag137/138 sequential MMD(40)→critic(160) for r32/r64. User: rank optimum under the critic not yet found → keep going up.
 - **09-12 02:30:** aag133 (r64 x critic → 320 ep): 17.73 @560 → min 16.65 @654 → 17.29 @720 — saturated (like r32 at 320–480). **FID-50k 16.24 (record; r32 @320 16.79).**
+- **09-12 07:30:** aag136 plain r128 (400 ep): min 32.7 @200 → 33.56 @400 (plain: r32 29.85 < r64 ~31.5 < r128 33.6 — wider code, less regularisation). aag139 = r128 x critic next.
