@@ -98,6 +98,8 @@ ap.add_argument("--ts-floor", type=int, default=1, help="1: subtract the finite-
                                                         "previous step's assigned batches (independent), clamp at 0 -> optimise only until indistinguishable")
 ap.add_argument("--ts-floor-mult", type=float, default=1.0, help="stop margin: clamp the loss at 0 once stat < mult x floor (fresh-vs-assigned can never reach the "
                                                                  "assigned-vs-assigned floor exactly: 28k discrete anchors vs a continuum)")
+ap.add_argument("--ts-fresh-mult", type=int, default=1, help="k: k fresh batches per step; the assigned side = the current + previous k-1 assigned batches "
+                                                              "(feature history), the floor = stat between two disjoint k-batch histories -> larger n, lower floor, finer match")
 ap.add_argument("--ts-features", choices=["cls", "cls+patch"], default="cls", help="DINO features: CLS token, or CLS ++ mean patch token")
 ap.add_argument("--ts-slices", type=int, default=256, help="random directions for swd")
 ap.add_argument("--ts-gather", type=int, default=1, help="1: all_gather features across ranks (32 -> 256 samples per side) before the statistic")
@@ -243,6 +245,8 @@ class TwoSample:
     independent samples of the SAME distribution at the same n -> what "indistinguishable" looks like at this batch size."""
     def __init__(self):
         self.mu = self.sd = None; self.prev = None; self.floor = None; self.calls = 0
+        from collections import deque
+        self.buf = deque(maxlen=2 * a.ts_fresh_mult)  # gathered, standardised-later assigned features (detached), newest last
         self.gen = torch.Generator(device=dev).manual_seed(24680)  # identical on every rank -> identical statistic on every rank
     def feats(self, x):
         cls, patch = dino(x)
@@ -280,15 +284,23 @@ class TwoSample:
         with torch.autocast("cuda", enabled=False):
             ff = ff.float(); fa = fa.float()
             self._std(fa)
-            ff = (ff - self.mu) / self.sd; fa = (fa - self.mu) / self.sd
-            raw = self.stat(ff, fa)
+            k = a.ts_fresh_mult
+            self.buf.append(fa.detach())
+            hist = list(self.buf)
+            fa_side = torch.cat(hist[-k:], 0) if len(hist) >= k else None
             fl = torch.zeros((), device=ff.device)
+            if fa_side is None or fa_side.shape[0] != ff.shape[0]:
+                # history not full yet (or ragged last batch): no two-sample term this step
+                self.calls += 1
+                return torch.zeros((), device=ff.device, requires_grad=False) + 0 * ff.sum(), torch.zeros((), device=ff.device), fl
+            ff = (ff - self.mu) / self.sd; fa_side = (fa_side - self.mu) / self.sd
+            raw = self.stat(ff, fa_side)
             if a.ts_floor:
-                if self.prev is not None and self.prev.shape == fa.shape:
+                if len(hist) == 2 * k and all(h.shape == hist[0].shape for h in hist):
                     with torch.no_grad():
-                        f0 = self.stat(fa, self.prev)
+                        A = (torch.cat(hist[:k], 0) - self.mu) / self.sd; B = (torch.cat(hist[k:], 0) - self.mu) / self.sd
+                        f0 = self.stat(A, B)
                     self.floor = f0 if self.floor is None else self.floor.lerp(f0, 0.01)
-                self.prev = fa.detach()
                 if self.floor is not None: fl = self.floor * a.ts_floor_mult
         self.calls += 1
         return (raw - fl).clamp_min(0), raw.detach(), fl
@@ -369,7 +381,7 @@ if ddp:
         fdisc = torch.nn.parallel.DistributedDataParallel(fdisc, device_ids=[local])
 if ts is not None:
     log(f"two-sample loss on: {a.ts_loss} in DINO {a.ts_features} space, weight={a.ts_weight} ({'fixed' if a.ts_fixed else 'x adaptive'}), "
-        f"floor={f'{a.ts_floor_mult}x EMA of stat(assigned_t, assigned_t-1), clamp 0' if a.ts_floor else 'off'}, gather={bool(a.ts_gather)}; G(z_fresh) vs G(z_assigned).detach(), no real images, no critic")
+        f"floor={f'{a.ts_floor_mult}x EMA of stat(assigned_t, assigned_t-1), clamp 0' if a.ts_floor else 'off'}, gather={bool(a.ts_gather)}, fresh_mult={a.ts_fresh_mult}; G(z_fresh) vs G(z_assigned).detach(), no real images, no critic")
 if fadv:
     log(f"fresh-z adversary on: weight={a.fresh_gan_weight} ({'fixed' if a.fresh_gan_fixed else 'x adaptive'}), critic ndf={a.fresh_gan_ndf} "
         f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; "
@@ -475,9 +487,10 @@ for epoch in range(start_epoch, a.epochs):
         if fadv or ts is not None:
             # fresh-z term: samples from N(0,I) (labels drawn from the batch when conditional) judged by an
             # unpaired critic against the real batch -- supervision exactly where the pairs give none
-            zf = torch.randn(b.numel(), dim_z, device=dev, generator=fresh_gen)
+            kf = a.ts_fresh_mult if ts is not None else 1
+            zf = torch.randn(b.numel() * kf, dim_z, device=dev, generator=fresh_gen)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                pred_f = fwd(zf, y[b] if n_classes else None).float().clamp(-1, 1)
+                pred_f = fwd(zf, y[b].repeat(kf) if n_classes else None).float().clamp(-1, 1)
         if ts is not None:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 ts_loss, ts_raw, ts_fl = ts(pred_f, pred.detach().clamp(-1, 1))
@@ -490,6 +503,7 @@ for epoch in range(start_epoch, a.epochs):
                 # BatchNorm, so a fake-only batch would be normalised with different statistics and the
                 # generator would receive a critic signal unrelated to the one the critic was trained with
                 real_side = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "gen_assigned" else tgt
+                pred_f = pred_f[: tgt.shape[0]]
                 g_adv_f = g_loss_from(fdisc(torch.cat([real_side, pred_f], 0)).float()[tgt.shape[0]:])
             wf = torch.tensor(a.fresh_gan_weight, device=dev) if a.fresh_gan_fixed else adaptive_weight(loss, g_adv_f, raw.out.weight) * a.fresh_gan_weight
             total = total + wf * g_adv_f
