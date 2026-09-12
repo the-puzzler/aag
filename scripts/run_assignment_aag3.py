@@ -16,7 +16,7 @@ from aag.gaussianize import whiten, refine_direction, rank_transport_along, aag2
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--particles", required=True)
-ap.add_argument("--rotate", type=int, default=0, help="0 = per-coordinate scaling (as the AAG1 200k baseline); 1 = PCA whitening")
+ap.add_argument("--rotate", type=int, default=1, help="1 = PCA whitening (REQUIRED: with per-coordinate scaling the worst direction is just the top principal axis and single-direction transport raises the held-out defect); 0 = per-coordinate scaling")
 ap.add_argument("--ascent-steps", type=int, default=20)
 ap.add_argument("--ascent-lr", type=float, default=0.05)
 ap.add_argument("--restarts", type=int, default=4, help="random restarts per step, in addition to the warm start")
