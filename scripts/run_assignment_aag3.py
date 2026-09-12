@@ -19,7 +19,9 @@ ap.add_argument("--particles", required=True)
 ap.add_argument("--rotate", type=int, default=1, help="1 = PCA whitening (REQUIRED: with per-coordinate scaling the worst direction is just the top principal axis and single-direction transport raises the held-out defect); 0 = per-coordinate scaling")
 ap.add_argument("--ascent-steps", type=int, default=20)
 ap.add_argument("--ascent-lr", type=float, default=0.05)
-ap.add_argument("--restarts", type=int, default=4, help="random restarts per step, in addition to the warm start")
+ap.add_argument("--restarts", type=int, default=4, help="K fresh random initialisations per step (in addition to the warm start when --warm 1)")
+ap.add_argument("--warm", type=int, default=1, help="1: also warm-start from the previous worst direction; 0: pure form -- fresh random init(s) only "
+                                                     "(the exact update zeroes the defect along the chosen direction, so it is rarely tomorrow's worst)")
 ap.add_argument("--alpha", type=float, default=1.0, help="transport fraction along the chosen direction (1 = exact)")
 ap.add_argument("--eval-dirs", type=int, default=256)
 ap.add_argument("--eval-every", type=int, default=10)
@@ -46,17 +48,17 @@ meta = {k: v for k, v in d0.items() if k not in ("h", "label")}
 curve = {"step": [], "G": [], "ratio": [], "L_chosen": [], "L_random_mean": []}
 def save(path, step, tag):
     torch.save({"z": z.cpu(), "h": d0["h"], "label": labels, "mean": mean.cpu(), "W": W.cpu(), "W_inv": W_inv.cpu(), "steps": step,
-                "method": "aag3", "tag": tag, "rotate": a.rotate, "ascent_steps": a.ascent_steps, "restarts": a.restarts,
+                "method": "aag3", "tag": tag, "rotate": a.rotate, "ascent_steps": a.ascent_steps, "restarts": a.restarts, "warm": a.warm,
                 "floor": floor, "curve": curve, **meta}, path)
     json.dump(curve, open(str(out).replace(".pt", ".curve.json"), "w"))
 G = aag2_defect(z, dirs); r = G / floor
-print(f"{N:,} particles dim={D} rotate={a.rotate}  ascent {a.ascent_steps} steps x (warm + {a.restarts} restarts)  eval dirs={a.eval_dirs}  "
+print(f"{N:,} particles dim={D} rotate={a.rotate}  ascent {a.ascent_steps} steps x ({'warm + ' if a.warm else ''}{max(a.restarts,1)} fresh random init(s))  eval dirs={a.eval_dirs}  "
       f"floor G={floor:.6f} +/- {floor_sd:.6f}  start G={G:.6f} R_G={r:.3f}", flush=True)
 prev = _rand_unit(1, D, dev, z.dtype)[0]; crossed = None; best = G; best_step = 0; since = 0; t0 = time.time()
 for step in range(1, a.max_steps + 1):
-    cands = [refine_direction(z, prev, steps=a.ascent_steps, lr=a.ascent_lr)]
-    rnd = _rand_unit(a.restarts, D, dev, z.dtype)
-    for k in range(a.restarts):
+    cands = [refine_direction(z, prev, steps=a.ascent_steps, lr=a.ascent_lr)] if a.warm else []
+    rnd = _rand_unit(max(a.restarts, 1), D, dev, z.dtype)
+    for k in range(max(a.restarts, 1)):
         cands.append(refine_direction(z, rnd[k], steps=a.ascent_steps, lr=a.ascent_lr))
     Ls = [defect_along(c) for c in cands]
     j = max(range(len(cands)), key=lambda i: Ls[i]); u = cands[j]; L = Ls[j]
