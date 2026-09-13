@@ -76,7 +76,10 @@ ap.add_argument("--decode-workers", type=int, default=0, help="0 = cpu_count // 
 ap.add_argument("--resume", default=None, help="checkpoint path, or 'auto' = latest gen_ep*.pt under --out")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", type=Path, required=True)
-ap.add_argument("--arch", choices=["grid", "residual"], default="grid",
+ap.add_argument("--vit-dim", type=int, default=768); ap.add_argument("--vit-depth", type=int, default=12); ap.add_argument("--vit-heads", type=int, default=12)
+ap.add_argument("--vit-ztokens", type=int, default=8); ap.add_argument("--vit-patch", type=int, default=16)
+ap.add_argument("--vit-mode", choices=["self", "cross"], default="self", help="--arch vit: z tokens prepended (self) or cross-attended in every block (cross)")
+ap.add_argument("--arch", choices=["grid", "residual", "vit"], default="grid",
                 help="grid = Generator256 (reshape/stem onto a spatial grid, GroupNorm, DC-AE shortcuts); "
                      "residual = the published 64x64 recipe scaled to 256: flat z -> Linear -> 4x4 -> BatchNorm residual up-blocks (aag.ae.ResidualDecoder)")
 ap.add_argument("--ch", type=int, default=128, help="--arch residual: base channels of ResidualDecoder")
@@ -199,6 +202,11 @@ if a.arch == "residual":
         def forward(self, z, y=None):
             return self.dec(z)
     make = lambda: FlatGen().to(dev)
+elif a.arch == "vit":
+    from aag.vit_generator import ViTGenerator
+    assert n_classes == 0, "--arch vit is unconditional"
+    make = lambda: ViTGenerator(dim_z, image_size=DATASETS[a.dataset]["image_size"], patch=a.vit_patch, dim=a.vit_dim, depth=a.vit_depth,
+                                heads=a.vit_heads, z_bottleneck=a.z_bottleneck, n_ztok=a.vit_ztokens, mode=a.vit_mode).to(dev)
 else:
     make = lambda: Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
                                 cond_dim=a.cond_dim, width=a.width, n_res=a.n_res,
@@ -391,7 +399,7 @@ if adv:
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
 fwd = torch.compile(model) if a.compile else model
 
-log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''} width={a.width} n_res={a.n_res}"
+log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''}{f' vit dim={a.vit_dim} depth={a.vit_depth} heads={a.vit_heads} ztokens={a.vit_ztokens} patch={a.vit_patch} mode={a.vit_mode}' if a.arch == 'vit' else ''} width={a.width} n_res={a.n_res}"
     f"{' z_bottleneck=' + str(a.z_bottleneck) if a.z_bottleneck else ''}{' z_pre=' + str(a.z_pre_depth) + 'x' + str(a.z_pre_width) if a.z_pre_depth else ''}{' z_skip=' + a.z_skip + ('/k' + str(a.z_skip_rank) if a.z_skip == 'lowrank' else '') if a.z_skip != 'none' else ''}  batch {a.batch}x{world}={a.batch * world}  "
     f"{steps_per_epoch:,} steps/epoch x {a.epochs} epochs  lr {a.lr} warmup {a.warmup}  ema {a.ema}")
 log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  mse_weight {a.mse_weight}  lpips_weight {a.lpips_weight}  dino_weight {a.dino_weight}  "
@@ -574,7 +582,9 @@ for epoch in range(start_epoch, a.epochs):
                         "grid": grid, "n_classes": n_classes, "width": a.width, "n_res": a.n_res,
                         "cond_dim": a.cond_dim, "assignment": a.assignment, "arch": a.arch, "ch": a.ch,
                         "z_bottleneck": a.z_bottleneck, "z_skip": a.z_skip, "z_skip_rank": a.z_skip_rank,
-                        "z_pre_depth": a.z_pre_depth, "z_pre_width": a.z_pre_width}, str(ck) + ".tmp")
+                        "z_pre_depth": a.z_pre_depth, "z_pre_width": a.z_pre_width,
+                        "vit_dim": a.vit_dim, "vit_depth": a.vit_depth, "vit_heads": a.vit_heads, "vit_ztokens": a.vit_ztokens,
+                        "vit_patch": a.vit_patch, "vit_mode": a.vit_mode}, str(ck) + ".tmp")
             Path(str(ck) + ".tmp").replace(ck)
             (a.out / "curve.json").write_text(json.dumps(curve, indent=1))
     else:
