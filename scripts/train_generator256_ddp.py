@@ -79,7 +79,7 @@ ap.add_argument("--out", type=Path, required=True)
 ap.add_argument("--vit-dim", type=int, default=768); ap.add_argument("--vit-depth", type=int, default=12); ap.add_argument("--vit-heads", type=int, default=12)
 ap.add_argument("--vit-ztokens", type=int, default=8); ap.add_argument("--vit-patch", type=int, default=16)
 ap.add_argument("--vit-mode", choices=["self", "cross"], default="self", help="--arch vit: z tokens prepended (self) or cross-attended in every block (cross)")
-ap.add_argument("--arch", choices=["grid", "residual", "vit"], default="grid",
+ap.add_argument("--arch", choices=["grid", "residual", "vit", "hybrid"], default="grid",
                 help="grid = Generator256 (reshape/stem onto a spatial grid, GroupNorm, DC-AE shortcuts); "
                      "residual = the published 64x64 recipe scaled to 256: flat z -> Linear -> 4x4 -> BatchNorm residual up-blocks (aag.ae.ResidualDecoder)")
 ap.add_argument("--ch", type=int, default=128, help="--arch residual: base channels of ResidualDecoder")
@@ -207,6 +207,12 @@ elif a.arch == "vit":
     assert n_classes == 0, "--arch vit is unconditional"
     make = lambda: ViTGenerator(dim_z, image_size=DATASETS[a.dataset]["image_size"], patch=a.vit_patch, dim=a.vit_dim, depth=a.vit_depth,
                                 heads=a.vit_heads, z_bottleneck=a.z_bottleneck, n_ztok=a.vit_ztokens, mode=a.vit_mode).to(dev)
+elif a.arch == "hybrid":
+    from aag.hybrid_generator import HybridGenerator
+    assert n_classes == 0, "--arch hybrid is unconditional"
+    # --vit-patch doubles as the token grid (16 -> 16x16 tokens); --vit-dim/depth/heads size the trunk; --width/--n-res size the conv upsampler
+    make = lambda: HybridGenerator(dim_z, image_size=DATASETS[a.dataset]["image_size"], tok_grid=a.vit_patch, dim=a.vit_dim, depth=a.vit_depth,
+                                   heads=a.vit_heads, z_bottleneck=a.z_bottleneck, n_ztok=a.vit_ztokens, width=a.width, n_res=a.n_res).to(dev)
 else:
     make = lambda: Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
                                 cond_dim=a.cond_dim, width=a.width, n_res=a.n_res,
@@ -399,7 +405,7 @@ if adv:
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
 fwd = torch.compile(model) if a.compile else model
 
-log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''}{f' vit dim={a.vit_dim} depth={a.vit_depth} heads={a.vit_heads} ztokens={a.vit_ztokens} patch={a.vit_patch} mode={a.vit_mode}' if a.arch == 'vit' else ''} width={a.width} n_res={a.n_res}"
+log(f"generator: {n_params / 1e6:.1f}M params  arch={a.arch}{' ch=' + str(a.ch) if a.arch == 'residual' else ''}{f' vit dim={a.vit_dim} depth={a.vit_depth} heads={a.vit_heads} ztokens={a.vit_ztokens} patch={a.vit_patch} mode={a.vit_mode}' if a.arch in ('vit', 'hybrid') else ''} width={a.width} n_res={a.n_res}"
     f"{' z_bottleneck=' + str(a.z_bottleneck) if a.z_bottleneck else ''}{' z_pre=' + str(a.z_pre_depth) + 'x' + str(a.z_pre_width) if a.z_pre_depth else ''}{' z_skip=' + a.z_skip + ('/k' + str(a.z_skip_rank) if a.z_skip == 'lowrank' else '') if a.z_skip != 'none' else ''}  batch {a.batch}x{world}={a.batch * world}  "
     f"{steps_per_epoch:,} steps/epoch x {a.epochs} epochs  lr {a.lr} warmup {a.warmup}  ema {a.ema}")
 log(f"precision: {'bf16 autocast' if amp else 'fp32'}  compile: {a.compile}  mse_weight {a.mse_weight}  lpips_weight {a.lpips_weight}  dino_weight {a.dino_weight}  "

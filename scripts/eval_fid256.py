@@ -39,6 +39,9 @@ if ck.get("arch", "grid") == "residual":
             super().__init__(); self.dec = ResidualDecoder(dim_z, ch=ck["ch"], image_size=256); self.out = self.dec.net[-1]
         def forward(self, z, y=None): return self.dec(z)
     dim_z = sd["dec.fc.weight"].shape[1]; net = FlatGen().to(dev).eval()
+elif ck.get("arch", "grid") == "hybrid":
+    from aag.hybrid_generator import HybridGenerator, hybrid_kwargs_from_ckpt
+    net = HybridGenerator(dim_z, image_size=256, **hybrid_kwargs_from_ckpt(ck)).to(dev).eval()
 elif ck.get("arch", "grid") == "vit":
     from aag.vit_generator import ViTGenerator, vit_kwargs_from_ckpt
     net = ViTGenerator(dim_z, image_size=256, **vit_kwargs_from_ckpt(ck)).to(dev).eval()
