@@ -69,6 +69,7 @@ ap.add_argument("--val-frac", type=float, default=0.01)
 ap.add_argument("--eval-every", type=int, default=1, help="epochs")
 ap.add_argument("--fid-stats", default=None, help=".npz from compute_fid_stats_hf256.py")
 ap.add_argument("--fid-n", type=int, default=10000)
+ap.add_argument("--eval-assigned", type=int, default=0, help="1: also report the ON-ANCHOR FID (G at a fixed subset of assigned training z) at every eval")
 ap.add_argument("--log-every", type=int, default=200)
 ap.add_argument("--compile", action="store_true")
 ap.add_argument("--no-amp", action="store_true")
@@ -356,7 +357,7 @@ def lr_at(s):
     p = (s - a.warmup) / max(1, total_steps - a.warmup)
     return a.lr * (a.min_lr_frac + (1 - a.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * min(1.0, p))))
 start_epoch, gstep = 0, 0
-curve = {"epoch": [], "train_mse": [], "train_lpips": [], "val_mse": [], "val_lpips": [], "fid": []}
+curve = {"epoch": [], "train_mse": [], "train_lpips": [], "val_mse": [], "val_lpips": [], "fid": [], "fid_assigned": []}
 if a.resume == "auto":
     # latest checkpoint under --out, or a fresh start if there is none: lets a
     # preempted/relaunched job continue without editing the config
@@ -457,6 +458,27 @@ def fid_fresh(net):
         acts.append(torch.from_numpy(get_activations((img.float().clamp(-1, 1) + 1) / 2, dev, batch=m)))
     acts = torch.cat(acts).to(dev)
     if ddp:
+        gathered = [torch.empty_like(acts) for _ in range(world)]
+        dist.all_gather(gathered, acts); acts = torch.cat(gathered)
+    return fid_from_stats(ref["mu"], ref["sigma"], acts[:a.fid_n].cpu().numpy()) if is_main else None
+
+
+@torch.no_grad()
+def fid_assigned(net):
+    """On-anchor FID: G(z_i) for a FIXED subset of assigned training rows (first `per` of each rank's shard), same stats."""
+    from aag.fid import get_activations, fid_from_stats
+    ref = np.load(a.fid_stats)
+    per = math.ceil(a.fid_n / world)
+    idx = tr_idx[:per]
+    acts = []
+    for i in range(0, idx.numel(), a.batch):
+        b = idx[i:i + a.batch]
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            img = net(z[b], y[b] if n_classes else None)
+        acts.append(torch.from_numpy(get_activations((img.float().clamp(-1, 1) + 1) / 2, dev, batch=b.numel())))
+    acts = torch.cat(acts).to(dev)
+    if ddp:
+        n_min = torch.tensor([acts.shape[0]], device=dev); dist.all_reduce(n_min, op=dist.ReduceOp.MIN); acts = acts[: int(n_min.item())]
         gathered = [torch.empty_like(acts) for _ in range(world)]
         dist.all_gather(gathered, acts); acts = torch.cat(gathered)
     return fid_from_stats(ref["mu"], ref["sigma"], acts[:a.fid_n].cpu().numpy()) if is_main else None
@@ -566,10 +588,12 @@ for epoch in range(start_epoch, a.epochs):
     if (a.eval_every > 0 and (epoch + 1) % a.eval_every == 0) or epoch + 1 == a.epochs:
         vm, vl = evaluate(ema)
         fid = fid_fresh(ema) if a.fid_stats else None
-        curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid)
+        fid_a = fid_assigned(ema) if (a.fid_stats and a.eval_assigned) else None
+        curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid); curve.setdefault("fid_assigned", []).append(fid_a)
         gates = f"  gates={[round(float(g), 3) for g in raw.skip_gate]}" if getattr(raw, "z_skip", "none") != "none" else ""
         log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + gates + "  "
             f"heldout_mse={vm:.5f} heldout_lpips={vl:.4f}" + (f"  fid@{a.fid_n}={fid:.2f}" if fid is not None else "")
+            + (f"  fid_assigned@{a.fid_n}={fid_a:.2f}" if fid_a is not None else "")
             + f"  [{(time.time() - t0) / 3600:.2f} h]")
         if is_main:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
