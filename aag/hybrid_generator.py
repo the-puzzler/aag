@@ -8,8 +8,12 @@ from aag.vit_generator import Block
 
 class HybridGenerator(nn.Module):
     def __init__(self, dim_z: int, image_size: int = 256, tok_grid: int = 16, dim: int = 512, depth: int = 8, heads: int = 8,
-                 z_bottleneck: int = 64, n_ztok: int = 8, width: float = 1.4, n_res: int = 2, base_channels=(512, 256, 128, 64), cz: int = 64):
+                 z_bottleneck: int = 64, n_ztok: int = 8, width: float = 1.4, n_res: int = 2, base_channels=(512, 256, 128, 64), cz: int = 64,
+                 n_classes: int = 0):
         super().__init__()
+        # class conditioning: one learned class token appended to the z tokens (the trunk sees it in self-attention)
+        self.n_classes = n_classes
+        self.cls_emb = nn.Embedding(n_classes, dim) if n_classes else None
         self.g, self.dim, self.n_ztok, self.cz = tok_grid, dim, n_ztok, cz
         r = z_bottleneck if z_bottleneck > 0 else dim_z
         self.bott = nn.Linear(dim_z, r) if z_bottleneck > 0 else nn.Identity()
@@ -33,9 +37,13 @@ class HybridGenerator(nn.Module):
     def forward(self, z, y=None):
         B = z.shape[0]
         zt = self.ztok(self.bott(z)).view(B, self.n_ztok, self.dim) + self.zpos
+        n_pre = self.n_ztok
+        if self.cls_emb is not None:
+            assert y is not None, "class-conditional hybrid needs y"
+            zt = torch.cat([zt, self.cls_emb(y).unsqueeze(1)], 1); n_pre += 1
         x = torch.cat([zt, self.pos.expand(B, -1, -1)], 1)
         for b in self.blocks: x = b(x)
-        x = self.to_map(self.norm(x[:, self.n_ztok:]))                                  # (B, g*g, cz)
+        x = self.to_map(self.norm(x[:, n_pre:]))                                        # (B, g*g, cz)
         h = self.stem(x.transpose(1, 2).reshape(B, self.cz, self.g, self.g))
         for r in self.pre: h = r(h, None)
         for s in self.stages: h = s(h, None)
@@ -44,4 +52,5 @@ class HybridGenerator(nn.Module):
 
 def hybrid_kwargs_from_ckpt(ck):
     return dict(tok_grid=ck.get("vit_patch", 16), dim=ck.get("vit_dim", 512), depth=ck.get("vit_depth", 8), heads=ck.get("vit_heads", 8),
-                z_bottleneck=ck.get("z_bottleneck", 64), n_ztok=ck.get("vit_ztokens", 8), width=ck.get("width", 1.4), n_res=ck.get("n_res", 2))
+                z_bottleneck=ck.get("z_bottleneck", 64), n_ztok=ck.get("vit_ztokens", 8), width=ck.get("width", 1.4), n_res=ck.get("n_res", 2),
+                n_classes=int(ck.get("n_classes", 0)))

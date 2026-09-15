@@ -212,10 +212,11 @@ elif a.arch == "vit":
                                 heads=a.vit_heads, z_bottleneck=a.z_bottleneck, n_ztok=a.vit_ztokens, mode=a.vit_mode).to(dev)
 elif a.arch == "hybrid":
     from aag.hybrid_generator import HybridGenerator
-    assert n_classes == 0, "--arch hybrid is unconditional"
-    # --vit-patch doubles as the token grid (16 -> 16x16 tokens); --vit-dim/depth/heads size the trunk; --width/--n-res size the conv upsampler
+    # --vit-patch doubles as the token grid (16 -> 16x16 tokens); --vit-dim/depth/heads size the trunk; --width/--n-res size the conv upsampler;
+    # class-conditional via one class token in the trunk
     make = lambda: HybridGenerator(dim_z, image_size=DATASETS[a.dataset]["image_size"], tok_grid=a.vit_patch, dim=a.vit_dim, depth=a.vit_depth,
-                                   heads=a.vit_heads, z_bottleneck=a.z_bottleneck, n_ztok=a.vit_ztokens, width=a.width, n_res=a.n_res).to(dev)
+                                   heads=a.vit_heads, z_bottleneck=a.z_bottleneck, n_ztok=a.vit_ztokens, width=a.width, n_res=a.n_res,
+                                   n_classes=n_classes).to(dev)
 else:
     make = lambda: Generator256(dim_z, grid=grid, image_size=DATASETS[a.dataset]["image_size"], n_classes=n_classes,
                                 cond_dim=a.cond_dim, width=a.width, n_res=a.n_res,

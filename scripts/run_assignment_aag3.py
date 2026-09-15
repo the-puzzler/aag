@@ -12,7 +12,7 @@ format matches run_assignment_classes.py / run_assignment_aag2.py.
 import argparse, json, math, time
 from pathlib import Path
 import torch
-from aag.gaussianize import whiten, refine_direction, rank_transport_along, aag2_defect, aag2_floor, _rand_unit, _gaussian_quantiles
+from aag.gaussianize import whiten, refine_direction, rank_transport_along, aag2_defect, aag2_floor, _rand_unit, _gaussian_quantiles, _group_members
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--particles", required=True)
@@ -31,6 +31,13 @@ ap.add_argument("--min-rel-improve", type=float, default=0.005)
 ap.add_argument("--max-steps", type=int, default=200000)
 ap.add_argument("--save-every", type=int, default=1000)
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--groups", default=None, help="class_groups.pt (ImageNet): enables class-respecting transport")
+ap.add_argument("--levels", default="", help="comma list of hierarchy levels for group firings, e.g. joint,depth7,depth6,depth5,depth4,living,animal,dog")
+ap.add_argument("--grp-per-step", type=int, default=8, help="group firings per global step, split over levels (each: learned worst direction WITHIN the group, then group rank transport)")
+ap.add_argument("--cond-alpha", type=float, default=0.5)
+ap.add_argument("--max-group", type=int, default=32768)
+ap.add_argument("--cond-eval-classes", type=int, default=16, help="classes sampled for the conditional-vs-random-subset defect diagnostic at each eval")
+ap.add_argument("--stop-after-floor", type=int, default=0, help=">0: stop this many steps after the floor crossing (skip the plateau search)")
 ap.add_argument("--out", required=True)
 a = ap.parse_args()
 dev = "cuda"; torch.manual_seed(a.seed)
@@ -41,6 +48,32 @@ egen = torch.Generator(device=dev).manual_seed(1234 + a.seed)
 dirs = _rand_unit(a.eval_dirs, D, dev, z.dtype)  # frozen held-out diagnostic directions (never used for transport)
 floor, floor_sd = aag2_floor(N, D, dirs, n_clouds=a.floor_clouds, gen=egen, device=dev)
 q = _gaussian_quantiles(N, dev, z.dtype)
+labels_dev = torch.as_tensor(labels).to(dev)
+levels = [x.strip() for x in a.levels.split(",") if x.strip()]; grp_ids = {}
+if a.groups and levels:
+    Gm = torch.load(a.groups, map_location="cpu", weights_only=False)
+    for lv in levels:
+        grp_ids[lv] = Gm["levels"][lv].to(dev)[labels_dev]
+    grp_per = max(1, a.grp_per_step // len(levels))
+    print(f"class-respecting transport: levels={levels}, {grp_per} firings/level/step, cond_alpha={a.cond_alpha}, max_group={a.max_group}", flush=True)
+ggen = torch.Generator(device=dev).manual_seed(777 + a.seed)
+def group_fire(gid):
+    idx = _group_members(gid, a.max_group, ggen)
+    if idx.numel() > a.max_group: idx = idx[torch.randperm(idx.numel(), device=dev, generator=ggen)[:a.max_group]]
+    if idx.numel() < 64: return
+    zs = z[idx]
+    u = refine_direction(zs, _rand_unit(1, D, dev, z.dtype)[0], steps=a.ascent_steps, lr=a.ascent_lr)
+    proj = zs @ u; order = torch.argsort(proj); target = torch.empty_like(proj); target[order] = _gaussian_quantiles(idx.numel(), dev, z.dtype)
+    z[idx] += a.cond_alpha * (target - proj).unsqueeze(1) * u.unsqueeze(0)
+def cond_ratio():
+    """user diagnostic: mean class-conditional defect / mean random-subset defect of the same size (1.0 = z independent of class)"""
+    if not grp_ids: return float("nan")
+    cls = grp_ids.get("joint", labels_dev); rs = []
+    for c in torch.randint(int(cls.max()) + 1, (a.cond_eval_classes,), device=dev, generator=egen).tolist():
+        idx = (cls == c).nonzero(as_tuple=True)[0]
+        if idx.numel() < 64: continue
+        m = idx.numel(); dc = aag2_defect(z[idx], dirs); dr = aag2_defect(z[torch.randperm(N, device=dev, generator=egen)[:m]], dirs); rs.append(dc / max(dr, 1e-12))
+    return float(sum(rs) / max(len(rs), 1))
 def defect_along(u):
     s, _ = torch.sort(z @ u); return float(((s - q) ** 2).mean())
 out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
@@ -49,7 +82,7 @@ curve = {"step": [], "G": [], "ratio": [], "L_chosen": [], "L_random_mean": []}
 def save(path, step, tag):
     torch.save({"z": z.cpu(), "h": d0["h"], "label": labels, "mean": mean.cpu(), "W": W.cpu(), "W_inv": W_inv.cpu(), "steps": step,
                 "method": "aag3", "tag": tag, "rotate": a.rotate, "ascent_steps": a.ascent_steps, "restarts": a.restarts, "warm": a.warm,
-                "floor": floor, "curve": curve, **meta}, path)
+                "floor": floor, "curve": curve, "levels": levels, "cond_alpha": a.cond_alpha, "grp_per_step": a.grp_per_step, "max_group": a.max_group, **meta}, path)
     json.dump(curve, open(str(out).replace(".pt", ".curve.json"), "w"))
 G = aag2_defect(z, dirs); r = G / floor
 print(f"{N:,} particles dim={D} rotate={a.rotate}  ascent {a.ascent_steps} steps x ({'warm + ' if a.warm else ''}{max(a.restarts,1)} fresh random init(s))  eval dirs={a.eval_dirs}  "
@@ -64,6 +97,8 @@ for step in range(1, a.max_steps + 1):
     j = max(range(len(cands)), key=lambda i: Ls[i]); u = cands[j]; L = Ls[j]
     L_rand = float(((torch.sort(z @ rnd.T, dim=0)[0] - q.unsqueeze(1)) ** 2).mean())
     rank_transport_along(z, u, alpha=a.alpha); prev = u
+    for lv in levels:
+        for _ in range(grp_per): group_fire(grp_ids[lv])
     if step % a.eval_every == 0 or step == 1:
         G = aag2_defect(z, dirs); r = G / floor
         curve["step"].append(step); curve["G"].append(G); curve["ratio"].append(r); curve["L_chosen"].append(L); curve["L_random_mean"].append(L_rand)
@@ -72,7 +107,10 @@ for step in range(1, a.max_steps + 1):
         if G < best * (1 - a.min_rel_improve): best, best_step, since = G, step, 0
         else: since += 1
         if step % (a.eval_every * 10) == 0:
-            print(f"step {step:6d}  G={G:.6f}  R_G={r:.3f}  L(chosen)={L:.5f}  L(random)={L_rand:.5f}  best={best:.6f}@{best_step}  since={since}  [{(time.time()-t0)/step*1000:.0f} ms/step]", flush=True)
+            print(f"step {step:6d}  G={G:.6f}  R_G={r:.3f}  L(chosen)={L:.5f}  L(random)={L_rand:.5f}  best={best:.6f}@{best_step}  since={since}"
+                  + (f"  cond/random={cond_ratio():.3f}" if grp_ids else "") + f"  [{(time.time()-t0)/step*1000:.0f} ms/step]", flush=True)
+        if a.stop_after_floor > 0 and crossed is not None and step >= crossed + a.stop_after_floor:
+            print(f"  stopping {a.stop_after_floor} steps after the floor crossing (step {step}, R_G={r:.3f})", flush=True); break
         if since >= a.patience and crossed is not None:
             save(str(out).replace(".pt", "_plateau.pt"), step, "plateau"); print(f"  plateau at step {step}: best G={best:.6f} (R_G={best/floor:.3f}) @ step {best_step}, no >{a.min_rel_improve*100:.1f}% improvement in {a.patience} evals -> saved _plateau.pt", flush=True)
             break
