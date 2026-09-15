@@ -107,6 +107,8 @@ ap.add_argument("--ts-fresh-mult", type=int, default=1, help="k: k fresh batches
 ap.add_argument("--ts-features", choices=["cls", "cls+patch"], default="cls", help="DINO features: CLS token, or CLS ++ mean patch token")
 ap.add_argument("--ts-slices", type=int, default=256, help="random directions for swd")
 ap.add_argument("--ts-gather", type=int, default=1, help="1: all_gather features across ranks (32 -> 256 samples per side) before the statistic")
+ap.add_argument("--fresh-gan-r1", type=float, default=0.0, help="R1 gradient penalty (gamma) on the fresh critic's 'real' side, lazy every --r1-every steps")
+ap.add_argument("--r1-every", type=int, default=16)
 ap.add_argument("--fresh-critic-source", choices=["fresh", "assigned", "gen_assigned"], default="fresh",
                 help="what the fresh critic is TRAINED on as fakes: 'fresh' = G(z~N(0,I)) (default); 'assigned' = the supervised batch's "
                      "outputs G(z_i) only (user idea 2026-09-09: a generic realism boundary the generator is then pushed with at fresh z); "
@@ -400,7 +402,8 @@ if ts is not None:
 if fadv:
     log(f"fresh-z adversary on: weight={a.fresh_gan_weight} ({'fixed' if a.fresh_gan_fixed else 'x adaptive'}), critic ndf={a.fresh_gan_ndf} "
         f"n_layers={a.fresh_gan_layers} ({sum(p.numel() for p in fdisc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}; "
-        f"critic trained on {'G(z_assigned) vs G(N(0,I)) -- no real images' if a.fresh_critic_source == 'gen_assigned' else 'real vs ' + ('G(z_assigned) [supervised batch]' if a.fresh_critic_source == 'assigned' else 'G(N(0,I))')}; generator pushed at fresh z only")
+        f"critic trained on {'G(z_assigned) vs G(N(0,I)) -- no real images' if a.fresh_critic_source == 'gen_assigned' else 'real vs ' + ('G(z_assigned) [supervised batch]' if a.fresh_critic_source == 'assigned' else 'G(N(0,I))')}; generator pushed at fresh z only"
+        + (f"; R1 gamma={a.fresh_gan_r1} every {a.r1_every} steps" if a.fresh_gan_r1 > 0 else ""))
 if adv:
     log(f"pairwise adversary on: weight={a.gan_weight} ({'fixed' if a.gan_fixed else 'x adaptive'}), critic ndf={a.gan_ndf} "
         f"n_layers={a.gan_layers} ({sum(p.numel() for p in disc.parameters()) / 1e6:.1f}M), lr={a.gan_lr}")
@@ -560,11 +563,20 @@ for epoch in range(start_epoch, a.epochs):
             # in place, so two forwards before one backward corrupt the saved tensors of the first
             fake_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "assigned" else pred_f.detach()
             real_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "gen_assigned" else tgt
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            do_r1 = a.fresh_gan_r1 > 0 and gstep % a.r1_every == 0
+            if do_r1:
+                # R1 on the 'real' side, inside the same real||fake forward (BatchNorm statistics unchanged), fp32, double backward
+                real_d = real_d.detach().requires_grad_(True)
                 lg = fdisc(torch.cat([real_d, fake_d], 0)).float()
+                g_r1, = torch.autograd.grad(lg[: tgt.shape[0]].sum(), real_d, create_graph=True)
+                r1 = g_r1.pow(2).sum(dim=[1, 2, 3]).mean() * (a.fresh_gan_r1 / 2) * a.r1_every
+            else:
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    lg = fdisc(torch.cat([real_d, fake_d], 0)).float()
+                r1 = None
             d_loss_f = hinge_d_loss(lg[: tgt.shape[0]], lg[tgt.shape[0]:])
             opt_fd.zero_grad(set_to_none=True)
-            d_loss_f.backward()
+            (d_loss_f + r1 if r1 is not None else d_loss_f).backward()
             opt_fd.step()
             run_gf += g_adv_f.item() * b.numel(); run_df += d_loss_f.item() * b.numel(); run_wf += float(wf) * b.numel()
         with torch.no_grad():
