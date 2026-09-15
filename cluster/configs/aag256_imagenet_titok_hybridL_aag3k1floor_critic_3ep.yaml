@@ -11,7 +11,7 @@ env:
   R: /mnt/shared/aag/results_scale256
   D: /mnt/shared/aag/data
   RESUME: /mnt/shared/aag/results_scale256/imagenet_titok/gen_cls_hybridL_aag3k1floor/checkpoints/gen_ep016.pt
-  ASSIGN: /mnt/shared/aag/results_scale256/imagenet_titok/assign_aag3/assign_aag3_k1_floor.pt
+  ASSIGN: /mnt/shared/aag/results_scale256/imagenet_titok/assign_aag3/assign_aag3_k1_floor_slim.pt
 stages:
   - name: download
     cmd: >-
