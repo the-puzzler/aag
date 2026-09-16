@@ -107,11 +107,13 @@ ap.add_argument("--ts-stop-steps", type=int, default=0, help=">0: FLOOR-STOP -- 
 ap.add_argument("--ts-stop-frac", type=float, default=0.8)
 ap.add_argument("--fresh-local-k", type=int, default=0, help="LATENT-LOCAL matching (user idea 2026-09-25): >0 = for each fresh z use its k nearest ASSIGNED z "
                                                              "(whitened latent space; same class when conditional) as the anchor side of the MMD / critic instead of a random assigned batch")
-ap.add_argument("--fresh-local-mode", choices=["nbhd", "persample"], default="nbhd",
+ap.add_argument("--fresh-local-mode", choices=["nbhd", "persample", "nearest"], default="nbhd",
                 help="'nbhd': per step --fresh-local-nb neighbourhood centres c~N(0,I); assigned side = k nearest assigned z to c, fresh side = k nearest points to c of a fresh "
                      "N(0,I) pool of the SAME size as the assignment (same class when conditional) -> both sides local to the same neighbourhood, statistic per neighbourhood "
                      "(MMD) or one neighbourhood per critic batch; floor = same statistic between two independent fresh pools. "
-                     "'persample' (MMD only): each fresh z vs the kernel distribution of its own k nearest anchors")
+                     "'persample': each fresh z vs the kernel distribution of its own k nearest anchors (MMD) / its nearest anchor as the critic's real sample. "
+                     "'nearest' (MMD, middle ground): batch-level MMD between G(z_fresh) and G(nearest anchor of each z_fresh) -- local pairing, pooled statistic; "
+                     "floor = same statistic with the batch's anchors as queries vs their nearest OTHER anchor")
 ap.add_argument("--fresh-local-nb", type=int, default=4, help="neighbourhoods per step per rank in 'nbhd' mode (nb*k samples per side)")
 ap.add_argument("--ts-fresh-mult", type=int, default=1, help="k: k fresh batches per step; the assigned side = the current + previous k-1 assigned batches "
                                                               "(feature history), the floor = stat between two disjoint k-batch histories -> larger n, lower floor, finer match")
@@ -392,10 +394,11 @@ class TwoSample:
         self.calls += 1
         return (raw - fl).clamp_min(0), raw.detach(), fl
 
-    def __call__(self, pred_f, pred_assigned_detached):
+    def __call__(self, pred_f, pred_assigned_detached, floor_pair=None):
         ff = self.feats(pred_f)
         with torch.no_grad():
             fa = self.feats(pred_assigned_detached)
+            fp = [self.feats(x) for x in floor_pair] if floor_pair is not None else None
         if a.ts_gather and world > 1:
             # ranks can hold a PARTIAL last batch of different sizes (per-rank splits are not multiples of the batch);
             # all_gather needs equal shapes, so truncate every rank to the common minimum first (identical decision on all ranks)
@@ -405,6 +408,7 @@ class TwoSample:
             ff = torch.cat(dnf.all_gather(ff), 0)
             with torch.no_grad():
                 fa = torch.cat(dnf.all_gather(fa), 0)
+                if fp is not None: fp = [torch.cat(dnf.all_gather(x[:n_min]), 0) for x in fp]
         with torch.autocast("cuda", enabled=False):
             ff = ff.float(); fa = fa.float()
             self._std(fa)
@@ -419,7 +423,12 @@ class TwoSample:
                 return torch.zeros((), device=ff.device, requires_grad=False) + 0 * ff.sum(), torch.zeros((), device=ff.device), fl
             ff = (ff - self.mu) / self.sd; fa_side = (fa_side - self.mu) / self.sd
             raw = self.stat(ff, fa_side)
-            if a.ts_floor:
+            if a.ts_floor and fp is not None:
+                # matched null: the batch's anchors as queries vs their nearest OTHER anchor, same construction as fresh -> nearest anchor
+                with torch.no_grad():
+                    f0 = self.stat((fp[0].float() - self.mu) / self.sd, (fp[1].float() - self.mu) / self.sd)
+                self.floor = f0 if self.floor is None else self.floor.lerp(f0, 0.01); fl = self.floor * a.ts_floor_mult
+            elif a.ts_floor:
                 if len(hist) == 2 * k and all(h.shape == hist[0].shape for h in hist):
                     with torch.no_grad():
                         A = (torch.cat(hist[:k], 0) - self.mu) / self.sd; B = (torch.cat(hist[k:], 0) - self.mu) / self.sd
@@ -673,9 +682,20 @@ for epoch in range(start_epoch, a.epochs):
                         nnq = knn_assigned(z[q_idx], y[q_idx] if n_classes else None, a.fresh_local_k, exclude_self=q_idx + lo)
                         pred_fq = fwd(z[q_idx], y[q_idx] if n_classes else None).float().clamp(-1, 1)
                         pred_fnn = fwd(z_knn[nnq.flatten()].float(), y_knn[nnq.flatten()] if n_classes else None).float().clamp(-1, 1)
+            if a.fresh_local_k > 0 and a.fresh_local_mode == "nearest" and ts is not None:
+                # LATENT-LOCAL (nearest, middle ground): assigned side = G(nearest anchor of each fresh z), pooled batch statistic
+                assert kf == 1, "nearest mode needs --ts-fresh-mult 1"
+                yf = y[b] if n_classes else None
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    nn1 = knn_assigned(zf, yf, 1)[:, 0]
+                    anchor_side = fwd(z_knn[nn1].float(), y_knn[nn1] if n_classes else None).float().clamp(-1, 1)
+                    nnq = knn_assigned(z[b], yf, 1, exclude_self=b + lo)[:, 0]
+                    floor_pair = (pred.detach().clamp(-1, 1), fwd(z_knn[nnq].float(), y_knn[nnq] if n_classes else None).float().clamp(-1, 1))
         if ts is not None:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                if a.fresh_local_k > 0 and a.fresh_local_mode == "nbhd":
+                if a.fresh_local_k > 0 and a.fresh_local_mode == "nearest":
+                    ts_loss, ts_raw, ts_fl = ts(pred_f, anchor_side, floor_pair)
+                elif a.fresh_local_k > 0 and a.fresh_local_mode == "nbhd":
                     ts_loss, ts_raw, ts_fl = ts.neighbourhood(pred_f, anchor_side, null_ab, a.fresh_local_k)
                 elif a.fresh_local_k > 0 and a.fresh_local_mode == "persample":
                     ts_loss, ts_raw, ts_fl = ts.persample(pred_f, pred_nn_all, a.fresh_local_k, pred_fq, pred_fnn)
