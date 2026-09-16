@@ -1,8 +1,8 @@
-# ImageNet: MMD stage with FLOOR-STOP from the w1.9 (150M) AAG3 plain ep16.
+# ImageNet w1.4 MMD with the FRACTION floor-stop (>=80% of the last 500 steps clamped); aag189's consecutive rule never fired (26.04/26.26/27.27/27.82).
 # Encoding and the 300k-step hierarchy assignment run on the local box (user's call,
 # 2026-09-05); the assignment is uploaded to $R/imagenet/assign/ and this job waits for it.
 #   download -> wait for the assignment file -> FID stats -> 8-GPU generator.
-name: aag256_imagenet_titok_conv_flatw1.9_aag3k1floor_mmd_floorstop
+name: aag256_imagenet_titok_conv_flatw1.4_aag3k1floor_mmd_floorstop2
 env:
   AAG_HF_ROOT: /mnt/shared/aag/hf
   HF_HOME: /mnt/shared/aag/hf_home
@@ -10,7 +10,7 @@ env:
   HF_HUB_ENABLE_HF_TRANSFER: "0"
   R: /mnt/shared/aag/results_scale256
   D: /mnt/shared/aag/data
-  RESUME: /mnt/shared/aag/results_scale256/imagenet_titok/gen_cls_conv_flatw1.9_aag3k1floor/checkpoints/gen_ep016.pt
+  RESUME: /mnt/shared/aag/results_scale256/imagenet_titok/gen_cls_conv_flatw1.4_aag3k1floor/checkpoints/gen_ep016.pt
   ASSIGN: /mnt/shared/aag/results_scale256/imagenet_titok/assign_aag3/assign_aag3_k1_floor_slim.pt
 stages:
   - name: download
@@ -27,5 +27,5 @@ stages:
     ddp: true
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset imagenet256
-      --width 1.9 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 20 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.01 --eval-every 1 --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-stop-steps 500 --ts-stop-frac 0.8
-      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --out $R/imagenet_titok/gen_cls_conv_flatw1.9_aag3k1floor_mmd_floorstop
+      --width 1.4 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 20 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.01 --eval-every 1 --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-stop-steps 500 --ts-stop-frac 0.8
+      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --out $R/imagenet_titok/gen_cls_conv_flatw1.4_aag3k1floor_mmd_floorstop2
