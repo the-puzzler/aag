@@ -473,7 +473,8 @@ def fid_assigned(net):
     from aag.fid import get_activations, fid_from_stats
     ref = np.load(a.fid_stats)
     per = math.ceil(a.fid_n / world)
-    idx = tr_idx[:per]
+    # FIXED RANDOM subset of this rank's training rows (rows can be class-ordered, e.g. ImageNet: the first rows would cover few classes)
+    idx = tr_idx[torch.randperm(tr_idx.numel(), device=dev, generator=torch.Generator(device=dev).manual_seed(4242 + rank))[:per]]
     acts = []
     for i in range(0, idx.numel(), a.batch):
         b = idx[i:i + a.batch]
