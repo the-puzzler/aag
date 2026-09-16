@@ -102,8 +102,9 @@ ap.add_argument("--ts-floor", type=int, default=1, help="1: subtract the finite-
                                                         "previous step's assigned batches (independent), clamp at 0 -> optimise only until indistinguishable")
 ap.add_argument("--ts-floor-mult", type=float, default=1.0, help="stop margin: clamp the loss at 0 once stat < mult x floor (fresh-vs-assigned can never reach the "
                                                                  "assigned-vs-assigned floor exactly: 28k discrete anchors vs a continuum)")
-ap.add_argument("--ts-stop-steps", type=int, default=0, help=">0: FLOOR-STOP -- end training once the two-sample loss has been clamped at 0 (stat below the floor margin) "
-                                                              "for this many consecutive steps; the checkpoint saved at that point is the unpicked endpoint")
+ap.add_argument("--ts-stop-steps", type=int, default=0, help=">0: FLOOR-STOP -- end training once the two-sample loss has been clamped at 0 (stat below the floor margin) on at least "
+                                                              "--ts-stop-frac of the last N steps (the stat hovers AT the floor, so consecutive runs never happen); the checkpoint saved then is the unpicked endpoint")
+ap.add_argument("--ts-stop-frac", type=float, default=0.8)
 ap.add_argument("--ts-fresh-mult", type=int, default=1, help="k: k fresh batches per step; the assigned side = the current + previous k-1 assigned batches "
                                                               "(feature history), the floor = stat between two disjoint k-batch histories -> larger n, lower floor, finer match")
 ap.add_argument("--ts-features", choices=["cls", "cls+patch"], default="cls", help="DINO features: CLS token, or CLS ++ mean patch token")
@@ -493,7 +494,8 @@ def fid_assigned(net):
 
 t0 = time.time()
 gstep_run0 = gstep    # throughput/ETA count from here, whatever step the resume landed on
-ts_clamped_run = 0; floor_stop = False
+from collections import deque
+ts_clamped_win = deque(maxlen=max(a.ts_stop_steps, 1)); floor_stop = False
 for epoch in range(start_epoch, a.epochs):
     model.train()
     perm = tr_idx[torch.randperm(tr_idx.numel(), device=dev)]
@@ -542,8 +544,8 @@ for epoch in range(start_epoch, a.epochs):
             wt = torch.tensor(a.ts_weight, device=dev) if a.ts_fixed else (adaptive_weight(loss, ts_loss, raw.out.weight) * a.ts_weight if ts_loss.item() > 0 else torch.zeros((), device=dev))
             total = total + wt * ts_loss
             if a.ts_stop_steps > 0:   # identical on every rank: the gathered statistic is the same everywhere
-                ts_clamped_run = ts_clamped_run + 1 if (ts_loss.item() == 0 and ts_fl.item() > 0) else 0
-                if ts_clamped_run >= a.ts_stop_steps:
+                ts_clamped_win.append(1 if (ts_loss.item() == 0 and ts_fl.item() > 0) else 0)
+                if len(ts_clamped_win) == a.ts_stop_steps and sum(ts_clamped_win) >= a.ts_stop_frac * a.ts_stop_steps:
                     floor_stop = True
         if fadv:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
@@ -593,7 +595,7 @@ for epoch in range(start_epoch, a.epochs):
                 pe.lerp_(pm, 1 - a.ema)
         gstep += 1
         if floor_stop:
-            log(f"FLOOR-STOP: two-sample loss clamped for {a.ts_stop_steps} consecutive steps at step {gstep} (epoch {epoch + 1}) -> evaluating and saving, then stopping")
+            log(f"FLOOR-STOP: two-sample loss clamped on >= {a.ts_stop_frac:.0%} of the last {a.ts_stop_steps} steps at step {gstep} (epoch {epoch + 1}) -> evaluating and saving, then stopping")
             break
         run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel(); run_dn += dn.item() * b.numel()
         if ts is not None:
