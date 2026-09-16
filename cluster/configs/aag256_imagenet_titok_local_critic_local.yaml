@@ -1,0 +1,31 @@
+# ImageNet latent-LOCAL critic (one neighbourhood per critic batch per rank: real = 32 nearest same-class anchors to the centre, fake = 32 nearest of a fresh pool; critic UNCHANGED), 3 ep; control = aag184 (44.35).
+# Encoding and the 300k-step hierarchy assignment run on the local box (user's call,
+# 2026-09-05); the assignment is uploaded to $R/imagenet/assign/ and this job waits for it.
+#   download -> wait for the assignment file -> FID stats -> 8-GPU generator.
+name: aag256_imagenet_titok_local_critic_local
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  TORCH_HOME: /mnt/shared/aag/torch_hub
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+  RESUME: /mnt/shared/aag/results_scale256/imagenet_titok/gen_cls_conv_flatw1.4_aag3k1floor/checkpoints/gen_ep016.pt
+  ASSIGN: /mnt/shared/aag/results_scale256/imagenet_titok/assign_aag3/assign_aag3_k1_floor_slim.pt
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/imagenet256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('benjamin-paine/imagenet-1k-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/imagenet-1k-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)" &&
+      df -h /mnt/shared
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset imagenet256 --n 0 --out $D/imagenet256/fid_stats_train_full.npz
+  - name: wait_assignment
+    cmd: python cluster/wait_for_file.py $ASSIGN --hours 12
+  - name: generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset imagenet256
+      --width 1.4 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 19 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.01 --eval-every 1 --fresh-gan-weight 1.0 --fresh-gan-layers 4 --fresh-gan-ndf 128 --eval-assigned 1 --fresh-critic-source gen_assigned --fresh-local-k 32 --fresh-local-mode nbhd --fresh-local-nb 1
+      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --out $R/imagenet_titok/gen_cls_local_critic_local

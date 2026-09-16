@@ -105,6 +105,14 @@ ap.add_argument("--ts-floor-mult", type=float, default=1.0, help="stop margin: c
 ap.add_argument("--ts-stop-steps", type=int, default=0, help=">0: FLOOR-STOP -- end training once the two-sample loss has been clamped at 0 (stat below the floor margin) on at least "
                                                               "--ts-stop-frac of the last N steps (the stat hovers AT the floor, so consecutive runs never happen); the checkpoint saved then is the unpicked endpoint")
 ap.add_argument("--ts-stop-frac", type=float, default=0.8)
+ap.add_argument("--fresh-local-k", type=int, default=0, help="LATENT-LOCAL matching (user idea 2026-09-25): >0 = for each fresh z use its k nearest ASSIGNED z "
+                                                             "(whitened latent space; same class when conditional) as the anchor side of the MMD / critic instead of a random assigned batch")
+ap.add_argument("--fresh-local-mode", choices=["nbhd", "persample"], default="nbhd",
+                help="'nbhd': per step --fresh-local-nb neighbourhood centres c~N(0,I); assigned side = k nearest assigned z to c, fresh side = k nearest points to c of a fresh "
+                     "N(0,I) pool of the SAME size as the assignment (same class when conditional) -> both sides local to the same neighbourhood, statistic per neighbourhood "
+                     "(MMD) or one neighbourhood per critic batch; floor = same statistic between two independent fresh pools. "
+                     "'persample' (MMD only): each fresh z vs the kernel distribution of its own k nearest anchors")
+ap.add_argument("--fresh-local-nb", type=int, default=4, help="neighbourhoods per step per rank in 'nbhd' mode (nb*k samples per side)")
 ap.add_argument("--ts-fresh-mult", type=int, default=1, help="k: k fresh batches per step; the assigned side = the current + previous k-1 assigned batches "
                                                               "(feature history), the floor = stat between two disjoint k-batch histories -> larger n, lower floor, finer match")
 ap.add_argument("--ts-features", choices=["cls", "cls+patch"], default="cls", help="DINO features: CLS token, or CLS ++ mean patch token")
@@ -160,6 +168,45 @@ levels = A.get("levels", [])
 n_classes = a.n_classes if a.n_classes >= 0 else (int(lab_all.max()) + 1 if levels else 0)
 lo, hi = rank_slice(N, rank, world)
 z = z_all[lo:hi].to(dev); y = lab_all[lo:hi].to(dev)
+if a.fresh_local_k > 0:
+    # every rank needs ALL anchors for the neighbour search (the training shard is 1/world of them)
+    z_knn = z_all.to(dev, torch.float16).contiguous(); y_knn = lab_all.to(dev)
+    if n_classes > 0:
+        _ord = torch.argsort(y_knn); _cnt = torch.bincount(y_knn, minlength=int(y_knn.max()) + 1); _off = torch.cat([torch.zeros(1, device=dev, dtype=torch.long), _cnt.cumsum(0)])
+    else:
+        _ord = _off = None
+    def knn_assigned(zq, yq, k, exclude_self=None):
+        """indices (B, k) of the k nearest assigned z to each query (same class when labels exist). exclude_self: (B,) row ids to drop."""
+        out = torch.empty(zq.shape[0], k, device=dev, dtype=torch.long); zq16 = zq.to(torch.float16)
+        for i in range(zq.shape[0]):
+            if _ord is not None:
+                c = int(yq[i]); rows = _ord[_off[c]:_off[c + 1]]; cand = z_knn[rows]
+            else:
+                rows = None; cand = z_knn
+            d2 = torch.cdist(zq16[i:i + 1].float(), cand.float()).squeeze(0) if cand.shape[0] <= 65536 else torch.cat([torch.cdist(zq16[i:i + 1].float(), cand[j:j + 65536].float()).squeeze(0) for j in range(0, cand.shape[0], 65536)])
+            if exclude_self is not None:
+                own = exclude_self[i]
+                if rows is not None:
+                    hit = (rows == own).nonzero(as_tuple=True)[0]
+                    if hit.numel(): d2[hit] = float("inf")
+                else:
+                    d2[own] = float("inf")
+            nn_ = torch.topk(d2, k, largest=False).indices
+            out[i] = rows[nn_] if rows is not None else nn_
+        return out
+    def local_fresh(c, yc, k, n_pools):
+        """for each centre c_i: draw n_pools independent fresh N(0,I) pools of the same size as the (class-)assignment and return
+        the k nearest pool points to c_i from each pool -> list of n_pools tensors (nb*k, dim_z). Same locality notion (kNN rank) as the anchors."""
+        outs = [[] for _ in range(n_pools)]
+        for i in range(c.shape[0]):
+            P = int(_cnt[int(yc[i])]) if _ord is not None else z_knn.shape[0]
+            for j in range(n_pools):
+                pool = torch.randn(P, c.shape[1], device=dev, generator=fresh_gen)
+                d2 = torch.cdist(c[i:i + 1], pool).squeeze(0)
+                outs[j].append(pool[torch.topk(d2, k, largest=False).indices])
+        return [torch.cat(o, 0) for o in outs]
+    log(f"latent-local matching on: mode={a.fresh_local_mode} k={a.fresh_local_k}" + (f" nb={a.fresh_local_nb}" if a.fresh_local_mode == "nbhd" else "") +
+        f" (class-restricted={_ord is not None}); anchors = k nearest assigned z, fresh = k nearest of a fresh pool of the same size; critic architecture unchanged")
 del z_all
 log(f"assignment {a.assignment}: N={N:,}/{N_avail:,} dim_z={dim_z} grid={grid} levels={levels} "
     f"steps={A.get('steps')} -> n_classes={n_classes} ({'class-conditional' if n_classes else 'unconditional'})")
@@ -289,6 +336,62 @@ class TwoSample:
         dirs = F.normalize(torch.randn(f1.shape[1], a.ts_slices, device=f1.device, generator=self.gen), dim=0)
         p1 = (f1 @ dirs).sort(0).values; p2 = (f2 @ dirs).sort(0).values
         return (p1 - p2).pow(2).mean()
+    def _mmd_groups(self, x, y, k, med):
+        """x, y: (nb, k, D) -> per-neighbourhood biased MMD^2 with the RBF mixture, mean over neighbourhoods"""
+        def kern(p, q):
+            d = torch.cdist(p, q).pow(2); return sum(torch.exp(-d / (med * s_)) for s_ in (0.5, 1.0, 2.0)) / 3
+        return (kern(x, x).mean(dim=(1, 2)) + kern(y, y).mean(dim=(1, 2)) - 2 * kern(x, y).mean(dim=(1, 2))).mean()
+
+    def neighbourhood(self, pred_f, pred_a, null_ab, k):
+        """Per-neighbourhood two-sample statistic: fresh side (k nearest fresh-pool points to the centre) vs assigned side (k nearest anchors),
+        MMD^2 computed inside each neighbourhood and averaged (no pooling across neighbourhoods). Floor = same statistic between two independent
+        fresh pools of the same neighbourhoods (exact null: anchors distributed like the fresh prior)."""
+        ff = self.feats(pred_f); nb = ff.shape[0] // k
+        with torch.no_grad():
+            fa = self.feats(pred_a); fn = [self.feats(p) for p in null_ab]
+        with torch.autocast("cuda", enabled=False):
+            ff = ff.float(); fa = fa.float(); self._std(fa)
+            ff = ((ff - self.mu) / self.sd).view(nb, k, -1); fa = ((fa - self.mu) / self.sd).view(nb, k, -1)
+            with torch.no_grad():
+                d2 = torch.cdist(fa.reshape(nb * k, -1), fa.reshape(nb * k, -1)).pow(2); med = d2[d2 > 0].median().clamp_min(1e-6)
+            raw = self._mmd_groups(ff, fa, k, med)
+            fl = torch.zeros((), device=ff.device)
+            if a.ts_floor and len(fn) == 2:
+                with torch.no_grad():
+                    f1 = ((fn[0].float() - self.mu) / self.sd).view(nb, k, -1); f2 = ((fn[1].float() - self.mu) / self.sd).view(nb, k, -1)
+                    f0 = self._mmd_groups(f1, f2, k, med)
+                self.floor = f0 if self.floor is None else self.floor.lerp(f0, 0.01)
+                fl = self.floor * a.ts_floor_mult
+        self.calls += 1
+        return (raw - fl).clamp_min(0), raw.detach(), fl
+
+    def persample(self, pred_f, pred_nn_all, k, pred_floor_q=None, pred_floor_nn=None):
+        """Per-sample local MMD^2: each fresh output vs the kernel distribution of its own k neighbours' outputs
+        (RBF mixture in standardised DINO space). Floor: the same statistic for anchors vs THEIR k nearest anchors (no grad)."""
+        ff = self.feats(pred_f); B = ff.shape[0]
+        with torch.no_grad():
+            fa = self.feats(pred_nn_all).view(B, k, -1)
+        with torch.autocast("cuda", enabled=False):
+            ff = ff.float(); fa = fa.float(); self._std(fa.reshape(B * k, -1))
+            ff = (ff - self.mu) / self.sd; fa = (fa - self.mu) / self.sd
+            with torch.no_grad():
+                d2 = torch.cdist(fa.reshape(B * k, -1), fa.reshape(B * k, -1)).pow(2); med = d2[d2 > 0].median().clamp_min(1e-6)
+            def kern(x, y):  # x (B,1,D) vs y (B,k,D) -> (B,k) ; or (B,k,D) vs (B,k,D) -> (B,k,k)
+                d = torch.cdist(x, y).pow(2); return sum(torch.exp(-d / (med * s_)) for s_ in (0.5, 1.0, 2.0)) / 3
+            cross = kern(ff.unsqueeze(1), fa).mean(dim=(1, 2))                       # mean_j k(f, a_j)
+            within = kern(fa, fa); within = (within.sum(dim=(1, 2)) - within.diagonal(dim1=1, dim2=2).sum(1)) / max(k * (k - 1), 1)
+            raw = (1.0 - 2 * cross + within).mean()
+            fl = torch.zeros((), device=ff.device)
+            if a.ts_floor and pred_floor_q is not None:
+                with torch.no_grad():
+                    fq = (self.feats(pred_floor_q).float() - self.mu) / self.sd; fn = ((self.feats(pred_floor_nn).float() - self.mu) / self.sd).view(B, k, -1)
+                    c0 = kern(fq.unsqueeze(1), fn).mean(dim=(1, 2)); w0 = kern(fn, fn); w0 = (w0.sum(dim=(1, 2)) - w0.diagonal(dim1=1, dim2=2).sum(1)) / max(k * (k - 1), 1)
+                    f0 = (1.0 - 2 * c0 + w0).mean()
+                self.floor = f0 if self.floor is None else self.floor.lerp(f0, 0.01)
+                fl = self.floor * a.ts_floor_mult
+        self.calls += 1
+        return (raw - fl).clamp_min(0), raw.detach(), fl
+
     def __call__(self, pred_f, pred_assigned_detached):
         ff = self.feats(pred_f)
         with torch.no_grad():
@@ -534,17 +637,58 @@ for epoch in range(start_epoch, a.epochs):
             # fresh-z term: samples from N(0,I) (labels drawn from the batch when conditional) judged by an
             # unpaired critic against the real batch -- supervision exactly where the pairs give none
             kf = a.ts_fresh_mult if ts is not None else 1
-            zf = torch.randn(b.numel() * kf, dim_z, device=dev, generator=fresh_gen)
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                pred_f = fwd(zf, y[b].repeat(kf) if n_classes else None).float().clamp(-1, 1)
+            anchor_side = pred.detach().clamp(-1, 1)
+            if a.fresh_local_k > 0 and a.fresh_local_mode == "nbhd":
+                # LATENT-LOCAL (nbhd): nb neighbourhoods; both sides = the k points nearest the centre from each distribution
+                k, nb = a.fresh_local_k, a.fresh_local_nb
+                with torch.no_grad():
+                    yc = y[b][:nb] if n_classes else None
+                    c = torch.randn(nb, dim_z, device=dev, generator=fresh_gen)
+                    nn_idx = knn_assigned(c, yc, k)                                                                 # (nb, k)
+                    pools = local_fresh(c, yc, k, 3 if (ts is not None and a.ts_floor) else 1)
+                    yl = yc.repeat_interleave(k) if n_classes else None
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                        anchor_side = fwd(z_knn[nn_idx.flatten()].float(), y_knn[nn_idx.flatten()] if n_classes else None).float().clamp(-1, 1)
+                        null_ab = [fwd(pz, yl).float().clamp(-1, 1) for pz in pools[1:]]                           # two independent fresh pools -> floor
+                zf = pools[0]
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    pred_f = fwd(zf, yl).float().clamp(-1, 1)
+            else:
+                zf = torch.randn(b.numel() * kf, dim_z, device=dev, generator=fresh_gen)
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    pred_f = fwd(zf, y[b].repeat(kf) if n_classes else None).float().clamp(-1, 1)
+            if a.fresh_local_k > 0 and a.fresh_local_mode == "persample":
+                # LATENT-LOCAL (persample, method 1): each fresh z vs its own k nearest anchors (points within a comparison are unrelated);
+                # MMD: kernel distribution of the k neighbours, floor = anchors vs their k nearest other anchors; critic: real side = each fresh z's NEAREST anchor
+                yf = y[b].repeat(kf) if n_classes else None
+                with torch.no_grad():
+                    nn_idx = knn_assigned(zf, yf, a.fresh_local_k)
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                        pred_nn_all = fwd(z_knn[nn_idx.flatten()].float(), y_knn[nn_idx.flatten()] if n_classes else None).float().clamp(-1, 1)
+                    if fadv:
+                        anchor_side = pred_nn_all.view(zf.shape[0], a.fresh_local_k, *pred_nn_all.shape[1:])[:, 0]
+                if ts is not None:
+                    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                        q_idx = b[: zf.shape[0]] if b.numel() >= zf.shape[0] else b.repeat(2)[: zf.shape[0]]
+                        nnq = knn_assigned(z[q_idx], y[q_idx] if n_classes else None, a.fresh_local_k, exclude_self=q_idx + lo)
+                        pred_fq = fwd(z[q_idx], y[q_idx] if n_classes else None).float().clamp(-1, 1)
+                        pred_fnn = fwd(z_knn[nnq.flatten()].float(), y_knn[nnq.flatten()] if n_classes else None).float().clamp(-1, 1)
         if ts is not None:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                ts_loss, ts_raw, ts_fl = ts(pred_f, pred.detach().clamp(-1, 1))
+                if a.fresh_local_k > 0 and a.fresh_local_mode == "nbhd":
+                    ts_loss, ts_raw, ts_fl = ts.neighbourhood(pred_f, anchor_side, null_ab, a.fresh_local_k)
+                elif a.fresh_local_k > 0 and a.fresh_local_mode == "persample":
+                    ts_loss, ts_raw, ts_fl = ts.persample(pred_f, pred_nn_all, a.fresh_local_k, pred_fq, pred_fnn)
+                else:
+                    ts_loss, ts_raw, ts_fl = ts(pred_f, anchor_side)
             ts_loss = ts_loss.float()
             wt = torch.tensor(a.ts_weight, device=dev) if a.ts_fixed else (adaptive_weight(loss, ts_loss, raw.out.weight) * a.ts_weight if ts_loss.item() > 0 else torch.zeros((), device=dev))
             total = total + wt * ts_loss
-            if a.ts_stop_steps > 0:   # identical on every rank: the gathered statistic is the same everywhere
-                ts_clamped_win.append(1 if (ts_loss.item() == 0 and ts_fl.item() > 0) else 0)
+            if a.ts_stop_steps > 0:   # global mode: identical on every rank (gathered statistic); local modes: per-rank statistic -> synchronise the vote
+                clamped = 1.0 if (ts_loss.item() == 0 and ts_fl.item() > 0) else 0.0
+                if a.fresh_local_k > 0 and ddp:
+                    cv = torch.tensor(clamped, device=dev); dist.all_reduce(cv, op=dist.ReduceOp.SUM); clamped = 1.0 if cv.item() >= 0.5 * world else 0.0
+                ts_clamped_win.append(clamped)
                 if len(ts_clamped_win) == a.ts_stop_steps and sum(ts_clamped_win) >= a.ts_stop_frac * a.ts_stop_steps:
                     floor_stop = True
         if fadv:
@@ -552,9 +696,9 @@ for epoch in range(start_epoch, a.epochs):
                 # score fakes inside the same real||fake batch the critic is trained on: the critic has
                 # BatchNorm, so a fake-only batch would be normalised with different statistics and the
                 # generator would receive a critic signal unrelated to the one the critic was trained with
-                real_side = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "gen_assigned" else tgt
-                pred_f = pred_f[: tgt.shape[0]]
-                g_adv_f = g_loss_from(fdisc(torch.cat([real_side, pred_f], 0)).float()[tgt.shape[0]:])
+                real_side = anchor_side if a.fresh_critic_source == "gen_assigned" else tgt
+                n_real = real_side.shape[0]; pred_f = pred_f[:n_real]
+                g_adv_f = g_loss_from(fdisc(torch.cat([real_side, pred_f], 0)).float()[n_real:])
             wf = torch.tensor(a.fresh_gan_weight, device=dev) if a.fresh_gan_fixed else adaptive_weight(loss, g_adv_f, raw.out.weight) * a.fresh_gan_weight
             total = total + wf * g_adv_f
         total.backward()
@@ -573,7 +717,7 @@ for epoch in range(start_epoch, a.epochs):
             # ONE critic forward on real||fake: under DDP every forward re-broadcasts the BatchNorm buffers
             # in place, so two forwards before one backward corrupt the saved tensors of the first
             fake_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "assigned" else pred_f.detach()
-            real_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "gen_assigned" else tgt
+            real_d = anchor_side if a.fresh_critic_source == "gen_assigned" else tgt
             do_r1 = a.fresh_gan_r1 > 0 and gstep % a.r1_every == 0
             if do_r1:
                 # R1 on the 'real' side, inside the same real||fake forward (BatchNorm statistics unchanged), fp32, double backward
