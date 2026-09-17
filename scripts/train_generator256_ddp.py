@@ -114,6 +114,9 @@ ap.add_argument("--fresh-local-mode", choices=["nbhd", "persample", "nearest"], 
                      "'persample': each fresh z vs the kernel distribution of its own k nearest anchors (MMD) / its nearest anchor as the critic's real sample. "
                      "'nearest' (MMD, middle ground): batch-level MMD between G(z_fresh) and G(nearest anchor of each z_fresh) -- local pairing, pooled statistic; "
                      "floor = same statistic with the batch's anchors as queries vs their nearest OTHER anchor")
+ap.add_argument("--fresh-critic-pair", type=int, default=0, help="PAIRWISE local critic (user idea 2026-09-28): critic input = channel-concat [image, G(nearest anchor of its z)]; "
+                                                                  "fake pair = [G(z_fresh), G(nn(z_fresh))], real pair = [G(z_anchor), G(nearest OTHER anchor)]; requires --fresh-local-mode nearest --fresh-local-k 1; "
+                                                                  "gradient only through the fresh image; same PatchGAN with 6 input channels")
 ap.add_argument("--fresh-local-nb", type=int, default=4, help="neighbourhoods per step per rank in 'nbhd' mode (nb*k samples per side)")
 ap.add_argument("--ts-fresh-mult", type=int, default=1, help="k: k fresh batches per step; the assigned side = the current + previous k-1 assigned batches "
                                                               "(feature history), the floor = stat between two disjoint k-batch histories -> larger n, lower floor, finer match")
@@ -452,7 +455,8 @@ if adv:
     opt_d = torch.optim.Adam(disc.parameters(), lr=a.gan_lr, betas=(0.5, 0.9))
     pair_gen = torch.Generator(device=dev).manual_seed(4321 + rank)
 if fadv:
-    fdisc = NLayerDiscriminator(3, a.fresh_gan_ndf, a.fresh_gan_layers).to(dev)
+    fdisc = NLayerDiscriminator(6 if a.fresh_critic_pair else 3, a.fresh_gan_ndf, a.fresh_gan_layers).to(dev)
+    if a.fresh_critic_pair: assert a.fresh_local_mode == "nearest" and a.fresh_local_k == 1, "--fresh-critic-pair needs --fresh-local-mode nearest --fresh-local-k 1"
     opt_fd = torch.optim.Adam(fdisc.parameters(), lr=a.gan_lr, betas=(0.5, 0.9))
     fresh_gen = torch.Generator(device=dev).manual_seed(8765 + rank)
 # Every rank must run the SAME number of steps per epoch: each backward is an NCCL
@@ -682,8 +686,10 @@ for epoch in range(start_epoch, a.epochs):
                         nnq = knn_assigned(z[q_idx], y[q_idx] if n_classes else None, a.fresh_local_k, exclude_self=q_idx + lo)
                         pred_fq = fwd(z[q_idx], y[q_idx] if n_classes else None).float().clamp(-1, 1)
                         pred_fnn = fwd(z_knn[nnq.flatten()].float(), y_knn[nnq.flatten()] if n_classes else None).float().clamp(-1, 1)
-            if a.fresh_local_k > 0 and a.fresh_local_mode == "nearest" and ts is not None:
-                # LATENT-LOCAL (nearest, middle ground): assigned side = G(nearest anchor of each fresh z), pooled batch statistic
+            pair_ref_f = None
+            if a.fresh_local_k > 0 and a.fresh_local_mode == "nearest":
+                # LATENT-LOCAL (nearest, middle ground): assigned side = G(nearest anchor of each fresh z), pooled batch statistic;
+                # with --fresh-critic-pair the critic sees [image || G(nearest anchor)] pairs (relational test, gradient only via the fresh image)
                 assert kf == 1, "nearest mode needs --ts-fresh-mult 1"
                 yf = y[b] if n_classes else None
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
@@ -691,6 +697,9 @@ for epoch in range(start_epoch, a.epochs):
                     anchor_side = fwd(z_knn[nn1].float(), y_knn[nn1] if n_classes else None).float().clamp(-1, 1)
                     nnq = knn_assigned(z[b], yf, 1, exclude_self=b + lo)[:, 0]
                     floor_pair = (pred.detach().clamp(-1, 1), fwd(z_knn[nnq].float(), y_knn[nnq] if n_classes else None).float().clamp(-1, 1))
+                if a.fresh_critic_pair:
+                    pair_ref_f = anchor_side                                                    # G(nn(z_fresh)), no grad
+                    anchor_side = torch.cat([floor_pair[0], floor_pair[1]], 1)                  # real pair: [G(z_a) || G(nearest other anchor)]
         if ts is not None:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 if a.fresh_local_k > 0 and a.fresh_local_mode == "nearest":
@@ -718,7 +727,8 @@ for epoch in range(start_epoch, a.epochs):
                 # generator would receive a critic signal unrelated to the one the critic was trained with
                 real_side = anchor_side if a.fresh_critic_source == "gen_assigned" else tgt
                 n_real = real_side.shape[0]; pred_f = pred_f[:n_real]
-                g_adv_f = g_loss_from(fdisc(torch.cat([real_side, pred_f], 0)).float()[n_real:])
+                crit_fake = torch.cat([pred_f, pair_ref_f[:n_real]], 1) if pair_ref_f is not None else pred_f
+                g_adv_f = g_loss_from(fdisc(torch.cat([real_side, crit_fake], 0)).float()[n_real:])
             wf = torch.tensor(a.fresh_gan_weight, device=dev) if a.fresh_gan_fixed else adaptive_weight(loss, g_adv_f, raw.out.weight) * a.fresh_gan_weight
             total = total + wf * g_adv_f
         total.backward()
@@ -736,7 +746,7 @@ for epoch in range(start_epoch, a.epochs):
         if fadv:
             # ONE critic forward on real||fake: under DDP every forward re-broadcasts the BatchNorm buffers
             # in place, so two forwards before one backward corrupt the saved tensors of the first
-            fake_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "assigned" else pred_f.detach()
+            fake_d = pred.detach().clamp(-1, 1) if a.fresh_critic_source == "assigned" else crit_fake.detach()
             real_d = anchor_side if a.fresh_critic_source == "gen_assigned" else tgt
             do_r1 = a.fresh_gan_r1 > 0 and gstep % a.r1_every == 0
             if do_r1:
