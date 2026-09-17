@@ -174,7 +174,7 @@ if a.fresh_local_k > 0:
     # every rank needs ALL anchors for the neighbour search (the training shard is 1/world of them)
     z_knn = z_all.to(dev, torch.float16).contiguous(); y_knn = lab_all.to(dev)
     if n_classes > 0:
-        _ord = torch.argsort(y_knn); _cnt = torch.bincount(y_knn, minlength=int(y_knn.max()) + 1); _off = torch.cat([torch.zeros(1, device=dev, dtype=torch.long), _cnt.cumsum(0)])
+        _ord = torch.argsort(y_knn); _cls_cnt = torch.bincount(y_knn, minlength=int(y_knn.max()) + 1); _off = torch.cat([torch.zeros(1, device=dev, dtype=torch.long), _cls_cnt.cumsum(0)])
     else:
         _ord = _off = None
     def knn_assigned(zq, yq, k, exclude_self=None):
@@ -201,7 +201,7 @@ if a.fresh_local_k > 0:
         the k nearest pool points to c_i from each pool -> list of n_pools tensors (nb*k, dim_z). Same locality notion (kNN rank) as the anchors."""
         outs = [[] for _ in range(n_pools)]
         for i in range(c.shape[0]):
-            P = int(_cnt[int(yc[i])]) if _ord is not None else z_knn.shape[0]
+            P = int(_cls_cnt[int(yc[i])]) if _ord is not None else z_knn.shape[0]
             for j in range(n_pools):
                 pool = torch.randn(P, c.shape[1], device=dev, generator=fresh_gen)
                 d2 = torch.cdist(c[i:i + 1], pool).squeeze(0)
