@@ -118,6 +118,10 @@ ap.add_argument("--fresh-local-mode", choices=["nbhd", "persample", "nearest"], 
                      "'persample': each fresh z vs the kernel distribution of its own k nearest anchors (MMD) / its nearest anchor as the critic's real sample. "
                      "'nearest' (MMD, middle ground): batch-level MMD between G(z_fresh) and G(nearest anchor of each z_fresh) -- local pairing, pooled statistic; "
                      "floor = same statistic with the batch's anchors as queries vs their nearest OTHER anchor")
+ap.add_argument("--inverse", default="", help="INVERSE-CYCLE (user idea 2026-09-29): frozen inverse model E(x)->z trained on the assigned pairs (scripts/train_inverse256.py); "
+                                               "adds ||E(G(z_fresh)) - target(z_fresh)||^2 (standardised) at fresh z -- pointwise off-anchor supervision with no external teacher")
+ap.add_argument("--cycle-weight", type=float, default=0.0, help="weight of the inverse-cycle term (adaptive gradient-balanced multiplier unless --cycle-fixed)")
+ap.add_argument("--cycle-fixed", action="store_true")
 ap.add_argument("--fresh-critic-pair", type=int, default=0, help="PAIRWISE local critic (user idea 2026-09-28): critic input = channel-concat [image, G(nearest anchor of its z)]; "
                                                                   "fake pair = [G(z_fresh), G(nn(z_fresh))], real pair = [G(z_anchor), G(nearest OTHER anchor)]; requires --fresh-local-mode nearest --fresh-local-k 1; "
                                                                   "gradient only through the fresh image; same PatchGAN with 6 input channels")
@@ -312,7 +316,14 @@ class DinoFeatures(torch.nn.Module):
         with torch.no_grad():
             ct, pt = self(tgt)
         return F.mse_loss(cp, ct) + F.mse_loss(pp, pt)
-dino = DinoFeatures().to(dev) if (a.dino_weight > 0 or a.ts_loss != "none") else None
+dino = DinoFeatures().to(dev) if (a.dino_weight > 0 or a.ts_loss != "none" or a.inverse) else None
+inv = None
+if a.inverse:
+    from aag.inverse import load_inverse
+    inv = load_inverse(a.inverse, dev)
+    log(f"inverse-cycle on: E from {a.inverse} (target={inv.kind}, dim {inv.mu.numel()}, val R2 {inv.r2_val}), weight {a.cycle_weight} ({'fixed' if a.cycle_fixed else 'adaptive'}); "
+        f"E frozen, gradient only through G at fresh z")
+cyc = inv is not None and a.cycle_weight > 0
 
 class TwoSample:
     """Two-sample statistic between fresh-z and assigned-z generations in frozen DINO feature space, with a finite-sample floor.
@@ -628,6 +639,7 @@ for epoch in range(start_epoch, a.epochs):
     run_g = run_d = run_w = 0.0
     run_gf = run_df = run_wf = 0.0
     run_ts = run_tf = run_tw = 0.0
+    run_cy = run_cw = run_cya = 0.0; n_cya = 0; cyc_anchor = None
     for i in range(steps_per_epoch):
         b = perm[i * a.batch:(i + 1) * a.batch]
         for pg in opt.param_groups:
@@ -654,11 +666,11 @@ for epoch in range(start_epoch, a.epochs):
                 g_adv = paired_g_loss(disc(pair).float(), lab)
             w = torch.tensor(a.gan_weight, device=dev) if a.gan_fixed else adaptive_weight(loss, g_adv, raw.out.weight) * a.gan_weight
             total = total + w * g_adv
-        if fadv or ts is not None:
+        if fadv or ts is not None or cyc:
             # fresh-z term: samples from N(0,I) (labels drawn from the batch when conditional) judged by an
             # unpaired critic against the real batch -- supervision exactly where the pairs give none
             kf = a.ts_fresh_mult if ts is not None else 1
-            anchor_side = pred.detach().clamp(-1, 1)
+            anchor_side = pred.detach().clamp(-1, 1); crit_fake = None
             if a.fresh_local_k > 0 and a.fresh_local_mode == "nbhd":
                 # LATENT-LOCAL (nbhd): nb neighbourhoods; both sides = the k points nearest the centre from each distribution
                 k, nb = a.fresh_local_k, a.fresh_local_nb
@@ -733,6 +745,18 @@ for epoch in range(start_epoch, a.epochs):
                 if len(ts_clamped_win) == a.ts_stop_steps:
                     if a.ts_stop_rule == "frac" and sum(ts_clamped_win) >= a.ts_stop_frac * a.ts_stop_steps: floor_stop = True
                     if a.ts_stop_rule == "mean" and sum(ts_margin_win) / len(ts_margin_win) <= 0: floor_stop = True
+        if cyc:
+            # INVERSE-CYCLE: E(G(z_fresh)) must return z_fresh's own target -> each fresh z keeps its location/identity
+            nb_ = b.numel()
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                c_f, p_f = dino(pred_f[:nb_])
+            cyc_loss = inv.cycle_loss(c_f, p_f, zf[:nb_])
+            wc = torch.tensor(a.cycle_weight, device=dev) if a.cycle_fixed else adaptive_weight(loss, cyc_loss, raw.out.weight) * a.cycle_weight
+            total = total + wc * cyc_loss
+            if gstep % 20 == 0:
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    c_a, p_a = dino(pred.detach().clamp(-1, 1))
+                    cyc_anchor = inv.cycle_loss(c_a, p_a, z[b])
         if fadv:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 # score fakes inside the same real||fake batch the critic is trained on: the critic has
@@ -787,12 +811,16 @@ for epoch in range(start_epoch, a.epochs):
         run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel(); run_dn += dn.item() * b.numel()
         if ts is not None:
             run_ts += float(ts_raw) * b.numel(); run_tf += float(ts_fl) * b.numel(); run_tw += float(wt) * b.numel()
+        if cyc:
+            run_cy += cyc_loss.item() * b.numel(); run_cw += float(wc) * b.numel()
+            if cyc_anchor is not None: run_cya += cyc_anchor.item(); n_cya += 1; cyc_anchor = None
         if is_main and gstep % a.log_every == 0:
             el = time.time() - t0
             print(f"  ep {epoch + 1} step {gstep - sched0:,}/{total_steps:,}  mse {run_mse / run_n:.5f}  lpips {run_lp / run_n:.4f}  "
                   + (f"g {run_g / run_n:.3f} d {run_d / run_n:.3f} w {run_w / run_n:.3g}  " if adv else "")
                   + (f"gf {run_gf / run_n:.3f} df {run_df / run_n:.3f} wf {run_wf / run_n:.3g}  " if fadv else "")
-                  + (f"ts {run_ts / run_n:.4g} fl {run_tf / run_n:.4g} wt {run_tw / run_n:.3g}  " if ts is not None else "") +
+                  + (f"ts {run_ts / run_n:.4g} fl {run_tf / run_n:.4g} wt {run_tw / run_n:.3g}  " if ts is not None else "")
+                  + (f"cyc {run_cy / run_n:.4f} cyc_a {run_cya / max(n_cya, 1):.4f} wc {run_cw / run_n:.3g}  " if cyc else "") +
                   f"lr {lr_at(gstep):.2e}  {(gstep - gstep_run0) * a.batch * world / el:,.0f} img/s  "
                   f"eta {(total_steps - (gstep - sched0)) * el / max(gstep - gstep_run0, 1) / 3600:.1f} h",
                   flush=True)

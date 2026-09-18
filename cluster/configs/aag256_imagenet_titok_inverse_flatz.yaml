@@ -1,0 +1,26 @@
+# ImageNet INVERSE MODEL E(x)->z (user idea 2026-09-29): frozen DINOv2 tokens -> attention-pooling head, trained on the assigned pairs only (full z: flat generator); 6 epochs, 8 GPUs.
+# Encoding and the 300k-step hierarchy assignment run on the local box (user's call,
+# 2026-09-05); the assignment is uploaded to $R/imagenet/assign/ and this job waits for it.
+#   download -> wait for the assignment file -> FID stats -> 8-GPU generator.
+name: aag256_imagenet_titok_inverse_flatz
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  TORCH_HOME: /mnt/shared/aag/torch_hub
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+  ASSIGN: /mnt/shared/aag/results_scale256/imagenet_titok/assign_aag3/assign_aag3_k1_floor_slim.pt
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('benjamin-paine/imagenet-1k-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/imagenet-1k-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: wait_assignment
+    cmd: python cluster/wait_for_file.py $ASSIGN --hours 12
+  - name: inverse
+    ddp: true
+    cmd: >-
+      python scripts/train_inverse256.py --assignment $ASSIGN --dataset imagenet256
+      --epochs 6 --batch 64 --lr 3e-4 --val-frac 0.01 --log-every 200 --out $R/imagenet_titok/inverse_flatz
