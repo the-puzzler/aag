@@ -768,7 +768,7 @@ for epoch in range(start_epoch, a.epochs):
                     cyc_anchor = inv.cycle_loss(c_a, p_a, z[b])
             if a.cycle_floor_mult > 0:
                 # floor at the anchor error: "pointwise indistinguishable from anchors" = fresh error == anchor error, never below
-                ca = cyc_anchor.detach()
+                ca = cyc_anchor.detach().clone()
                 if ddp: dist.all_reduce(ca); ca = ca / world
                 cyc_floor_ema = ca if cyc_floor_ema is None else cyc_floor_ema.lerp(ca, 0.01)
                 cyc_loss = (cyc_raw - a.cycle_floor_mult * cyc_floor_ema).clamp_min(0)
