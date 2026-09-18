@@ -1,0 +1,29 @@
+# CelebA FLOORED inverse-cycle + global MMD 40 ep; controls aag191 (19.38), unfloored aag210.
+# User (2026-09-05): adversary goes on the generator, not the AE; pipeline order = plain generator first, then extras.
+name: aag256_celebahq_titok_cyclefl_mmd
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  TORCH_HOME: /mnt/shared/aag/torch_hub
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+  ASSIGN: /mnt/shared/aag/results_scale256/celebahq_titok/assign_aag3/assign_aag3_k1_floor.pt
+  RESUME: /mnt/shared/aag/results_scale256/celebahq_titok/gen_uncond_200k_dino_gm4_bott64_w1.4_aag3k1floor/checkpoints/gen_ep400.pt
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/celebahq256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('korexyz/celeba-hq-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/celeba-hq-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)"
+  - name: wait_assignment
+    cmd: python cluster/wait_for_file.py $ASSIGN --hours 1
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset celebahq256 --n 0 --out $D/celebahq256/fid_stats_train_28000.npz
+  - name: generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset celebahq256
+      --n-classes 0 --z-bottleneck 64 --width 1.4 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 440 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.02 --eval-every 2
+      --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-fresh-mult 1 --inverse $R/celebahq_titok/inverse/inverse_r64_aag159.pt --cycle-weight 1.0 --cycle-floor-mult 1.0 --cycle-aug 1 
+      --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq_titok/gen_uncond_200k_dino_gm4_cyclefl_mmd

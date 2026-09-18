@@ -122,6 +122,9 @@ ap.add_argument("--inverse", default="", help="INVERSE-CYCLE (user idea 2026-09-
                                                "adds ||E(G(z_fresh)) - target(z_fresh)||^2 (standardised) at fresh z -- pointwise off-anchor supervision with no external teacher")
 ap.add_argument("--cycle-weight", type=float, default=0.0, help="weight of the inverse-cycle term (adaptive gradient-balanced multiplier unless --cycle-fixed)")
 ap.add_argument("--cycle-fixed", action="store_true")
+ap.add_argument("--cycle-floor-mult", type=float, default=0.0, help=">0: FLOOR the cycle term at m x EMA(anchor cycle error): loss = relu(cyc_fresh - m*floor). "
+                                                                       "Without it G exploits the frozen E (fresh error falls BELOW the anchor error while FID rises, aag209)")
+ap.add_argument("--cycle-aug", type=int, default=0, help="1: random crop (85-100%) + brightness/contrast jitter on the images before E (same family as E's training aug) -- harder to exploit")
 ap.add_argument("--fresh-critic-pair", type=int, default=0, help="PAIRWISE local critic (user idea 2026-09-28): critic input = channel-concat [image, G(nearest anchor of its z)]; "
                                                                   "fake pair = [G(z_fresh), G(nn(z_fresh))], real pair = [G(z_anchor), G(nearest OTHER anchor)]; requires --fresh-local-mode nearest --fresh-local-k 1; "
                                                                   "gradient only through the fresh image; same PatchGAN with 6 input channels")
@@ -324,6 +327,14 @@ if a.inverse:
     log(f"inverse-cycle on: E from {a.inverse} (target={inv.kind}, dim {inv.mu.numel()}, val R2 {inv.r2_val}), weight {a.cycle_weight} ({'fixed' if a.cycle_fixed else 'adaptive'}); "
         f"E frozen, gradient only through G at fresh z")
 cyc = inv is not None and a.cycle_weight > 0
+cyc_floor_ema = None
+def cyc_aug(x):
+    if not a.cycle_aug: return x
+    B, _, H, W = x.shape
+    sc = torch.empty(B, device=dev).uniform_(0.85, 1.0); th = torch.zeros(B, 2, 3, device=dev); th[:, 0, 0] = sc; th[:, 1, 1] = sc
+    th[:, 0, 2] = (torch.rand(B, device=dev) * 2 - 1) * (1 - sc); th[:, 1, 2] = (torch.rand(B, device=dev) * 2 - 1) * (1 - sc)
+    x = F.grid_sample(x, F.affine_grid(th, (B, 3, H, W), align_corners=False), mode="bilinear", padding_mode="reflection", align_corners=False)
+    return (x * torch.empty(B, 1, 1, 1, device=dev).uniform_(0.9, 1.1) + torch.empty(B, 1, 1, 1, device=dev).uniform_(-0.1, 0.1)).clamp(-1, 1)
 
 class TwoSample:
     """Two-sample statistic between fresh-z and assigned-z generations in frozen DINO feature space, with a finite-sample floor.
@@ -749,14 +760,22 @@ for epoch in range(start_epoch, a.epochs):
             # INVERSE-CYCLE: E(G(z_fresh)) must return z_fresh's own target -> each fresh z keeps its location/identity
             nb_ = b.numel()
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                c_f, p_f = dino(pred_f[:nb_])
-            cyc_loss = inv.cycle_loss(c_f, p_f, zf[:nb_])
-            wc = torch.tensor(a.cycle_weight, device=dev) if a.cycle_fixed else adaptive_weight(loss, cyc_loss, raw.out.weight) * a.cycle_weight
-            total = total + wc * cyc_loss
-            if gstep % 20 == 0:
+                c_f, p_f = dino(cyc_aug(pred_f[:nb_]))
+            cyc_raw = inv.cycle_loss(c_f, p_f, zf[:nb_])
+            if a.cycle_floor_mult > 0 or gstep % 20 == 0:
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                    c_a, p_a = dino(pred.detach().clamp(-1, 1))
+                    c_a, p_a = dino(cyc_aug(pred.detach().clamp(-1, 1)))
                     cyc_anchor = inv.cycle_loss(c_a, p_a, z[b])
+            if a.cycle_floor_mult > 0:
+                # floor at the anchor error: "pointwise indistinguishable from anchors" = fresh error == anchor error, never below
+                ca = cyc_anchor.detach()
+                if ddp: dist.all_reduce(ca); ca = ca / world
+                cyc_floor_ema = ca if cyc_floor_ema is None else cyc_floor_ema.lerp(ca, 0.01)
+                cyc_loss = (cyc_raw - a.cycle_floor_mult * cyc_floor_ema).clamp_min(0)
+            else:
+                cyc_loss = cyc_raw
+            wc = torch.tensor(a.cycle_weight, device=dev) if a.cycle_fixed else (adaptive_weight(loss, cyc_loss, raw.out.weight) * a.cycle_weight if cyc_loss.item() > 0 else torch.zeros((), device=dev))
+            total = total + wc * cyc_loss
         if fadv:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 # score fakes inside the same real||fake batch the critic is trained on: the critic has
@@ -812,7 +831,7 @@ for epoch in range(start_epoch, a.epochs):
         if ts is not None:
             run_ts += float(ts_raw) * b.numel(); run_tf += float(ts_fl) * b.numel(); run_tw += float(wt) * b.numel()
         if cyc:
-            run_cy += cyc_loss.item() * b.numel(); run_cw += float(wc) * b.numel()
+            run_cy += cyc_raw.item() * b.numel(); run_cw += float(wc) * b.numel()
             if cyc_anchor is not None: run_cya += cyc_anchor.item(); n_cya += 1; cyc_anchor = None
         if is_main and gstep % a.log_every == 0:
             el = time.time() - t0
