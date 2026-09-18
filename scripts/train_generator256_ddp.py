@@ -124,6 +124,8 @@ ap.add_argument("--cycle-weight", type=float, default=0.0, help="weight of the i
 ap.add_argument("--cycle-fixed", action="store_true")
 ap.add_argument("--cycle-floor-mult", type=float, default=0.0, help=">0: FLOOR the cycle term at m x EMA(anchor cycle error): loss = relu(cyc_fresh - m*floor). "
                                                                        "Without it G exploits the frozen E (fresh error falls BELOW the anchor error while FID rises, aag209)")
+ap.add_argument("--cycle-floor-pow", type=float, default=1.0, help="hinge power on the floored excess: 1 = relu(excess) (gradient = FULL grad of cyc whenever excess>0, however tiny); "
+                                                                    "2 = squared hinge, gradient ~ excess -> vanishes smoothly at the floor (use with --cycle-fixed and a small weight)")
 ap.add_argument("--cycle-aug", type=int, default=0, help="1: random crop (85-100%) + brightness/contrast jitter on the images before E (same family as E's training aug) -- harder to exploit")
 ap.add_argument("--fresh-critic-pair", type=int, default=0, help="PAIRWISE local critic (user idea 2026-09-28): critic input = channel-concat [image, G(nearest anchor of its z)]; "
                                                                   "fake pair = [G(z_fresh), G(nn(z_fresh))], real pair = [G(z_anchor), G(nearest OTHER anchor)]; requires --fresh-local-mode nearest --fresh-local-k 1; "
@@ -772,6 +774,7 @@ for epoch in range(start_epoch, a.epochs):
                 if ddp: dist.all_reduce(ca); ca = ca / world
                 cyc_floor_ema = ca if cyc_floor_ema is None else cyc_floor_ema.lerp(ca, 0.01)
                 cyc_loss = (cyc_raw - a.cycle_floor_mult * cyc_floor_ema).clamp_min(0)
+                if a.cycle_floor_pow != 1.0: cyc_loss = cyc_loss.pow(a.cycle_floor_pow)
             else:
                 cyc_loss = cyc_raw
             wc = torch.tensor(a.cycle_weight, device=dev) if a.cycle_fixed else (adaptive_weight(loss, cyc_loss, raw.out.weight) * a.cycle_weight if cyc_loss.item() > 0 else torch.zeros((), device=dev))

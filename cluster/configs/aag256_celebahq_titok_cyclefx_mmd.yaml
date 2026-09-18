@@ -1,4 +1,4 @@
-# CelebA floored inverse-cycle, FIXED weight 1.0 + global MMD 40 ep; control aag191 19.38, adaptive-floored aag216 20.11.
+# CelebA floored inverse-cycle, SQUARED-HINGE floor (grad ~ excess, vanishes at the floor), FIXED weight 0.1 + global MMD 40 ep; control aag191 19.38, adaptive-floored aag216 20.11.
 # User (2026-09-05): adversary goes on the generator, not the AE; pipeline order = plain generator first, then extras.
 name: aag256_celebahq_titok_cyclefx_mmd
 env:
@@ -25,5 +25,5 @@ stages:
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset celebahq256
       --n-classes 0 --z-bottleneck 64 --width 1.4 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 440 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.02 --eval-every 2
-      --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-fresh-mult 1 --inverse $R/celebahq_titok/inverse/inverse_r64_aag159.pt --cycle-weight 1.0 --cycle-floor-mult 1.0 --cycle-aug 1 --cycle-fixed 
+      --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-fresh-mult 1 --inverse $R/celebahq_titok/inverse/inverse_r64_aag159.pt --cycle-weight 0.1 --cycle-floor-mult 1.0 --cycle-floor-pow 2 --cycle-aug 1 --cycle-fixed 
       --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq_titok/gen_uncond_200k_dino_gm4_cyclefx_mmd
