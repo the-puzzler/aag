@@ -105,6 +105,10 @@ ap.add_argument("--ts-floor-mult", type=float, default=1.0, help="stop margin: c
 ap.add_argument("--ts-stop-steps", type=int, default=0, help=">0: FLOOR-STOP -- end training once the two-sample loss has been clamped at 0 (stat below the floor margin) on at least "
                                                               "--ts-stop-frac of the last N steps (the stat hovers AT the floor, so consecutive runs never happen); the checkpoint saved then is the unpicked endpoint")
 ap.add_argument("--ts-stop-frac", type=float, default=0.8)
+ap.add_argument("--ts-stop-rule", choices=["frac", "mean"], default="frac",
+                help="'frac': stop when >= --ts-stop-frac of the last N steps were clamped (fires ~3 epochs late: the stat hovers AT the floor). "
+                     "'mean': stop when the window MEAN of (raw - floor*mult) <= 0, i.e. the statistic has reached its null level on average -- "
+                     "never fires while raw is systematically above the floor, fires within one window once it is not")
 ap.add_argument("--fresh-local-k", type=int, default=0, help="LATENT-LOCAL matching (user idea 2026-09-25): >0 = for each fresh z use its k nearest ASSIGNED z "
                                                              "(whitened latent space; same class when conditional) as the anchor side of the MMD / critic instead of a random assigned batch")
 ap.add_argument("--fresh-local-mode", choices=["nbhd", "persample", "nearest"], default="nbhd",
@@ -611,7 +615,11 @@ def fid_assigned(net):
 t0 = time.time()
 gstep_run0 = gstep    # throughput/ETA count from here, whatever step the resume landed on
 from collections import deque
-ts_clamped_win = deque(maxlen=max(a.ts_stop_steps, 1)); floor_stop = False
+ts_clamped_win = deque(maxlen=max(a.ts_stop_steps, 1)); ts_margin_win = deque(maxlen=max(a.ts_stop_steps, 1)); floor_stop = False
+def ts_diag():
+    if a.ts_stop_steps <= 0 or not ts_margin_win: return ""
+    fin = [m for m in ts_margin_win if m != float("inf")]
+    return f"  ts_clamp={sum(ts_clamped_win) / len(ts_clamped_win):.0%} ts_margin={sum(fin) / max(len(fin), 1):+.5f}"
 for epoch in range(start_epoch, a.epochs):
     model.train()
     perm = tr_idx[torch.randperm(tr_idx.numel(), device=dev)]
@@ -718,8 +726,13 @@ for epoch in range(start_epoch, a.epochs):
                 if a.fresh_local_k > 0 and ddp:
                     cv = torch.tensor(clamped, device=dev); dist.all_reduce(cv, op=dist.ReduceOp.SUM); clamped = 1.0 if cv.item() >= 0.5 * world else 0.0
                 ts_clamped_win.append(clamped)
-                if len(ts_clamped_win) == a.ts_stop_steps and sum(ts_clamped_win) >= a.ts_stop_frac * a.ts_stop_steps:
-                    floor_stop = True
+                margin = (ts_raw - ts_fl).item() if ts_fl.item() > 0 else float("inf")   # no floor yet -> never counts as reached
+                if a.fresh_local_k > 0 and ddp:
+                    mv = torch.tensor(margin if margin != float("inf") else 1e9, device=dev); dist.all_reduce(mv, op=dist.ReduceOp.SUM); margin = mv.item() / world
+                ts_margin_win.append(margin)
+                if len(ts_clamped_win) == a.ts_stop_steps:
+                    if a.ts_stop_rule == "frac" and sum(ts_clamped_win) >= a.ts_stop_frac * a.ts_stop_steps: floor_stop = True
+                    if a.ts_stop_rule == "mean" and sum(ts_margin_win) / len(ts_margin_win) <= 0: floor_stop = True
         if fadv:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 # score fakes inside the same real||fake batch the critic is trained on: the critic has
@@ -769,7 +782,7 @@ for epoch in range(start_epoch, a.epochs):
                 pe.lerp_(pm, 1 - a.ema)
         gstep += 1
         if floor_stop:
-            log(f"FLOOR-STOP: two-sample loss clamped on >= {a.ts_stop_frac:.0%} of the last {a.ts_stop_steps} steps at step {gstep} (epoch {epoch + 1}) -> evaluating and saving, then stopping")
+            log(f"FLOOR-STOP ({a.ts_stop_rule}): clamped {sum(ts_clamped_win) / len(ts_clamped_win):.0%} of the last {a.ts_stop_steps} steps, mean(raw-floor) {sum(ts_margin_win) / len(ts_margin_win):+.5f}, at step {gstep} (epoch {epoch + 1}) -> evaluating and saving, then stopping")
             break
         run_mse += mse.item() * b.numel(); run_lp += perc.item() * b.numel(); run_n += b.numel(); run_dn += dn.item() * b.numel()
         if ts is not None:
@@ -791,7 +804,7 @@ for epoch in range(start_epoch, a.epochs):
         fid_a = fid_assigned(ema) if (a.fid_stats and a.eval_assigned) else None
         curve["val_mse"].append(vm); curve["val_lpips"].append(vl); curve["fid"].append(fid); curve.setdefault("fid_assigned", []).append(fid_a)
         gates = f"  gates={[round(float(g), 3) for g in raw.skip_gate]}" if getattr(raw, "z_skip", "none") != "none" else ""
-        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + gates + "  "
+        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + ts_diag() + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + gates + "  "
             f"heldout_mse={vm:.5f} heldout_lpips={vl:.4f}" + (f"  fid@{a.fid_n}={fid:.2f}" if fid is not None else "")
             + (f"  fid_assigned@{a.fid_n}={fid_a:.2f}" if fid_a is not None else "")
             + f"  [{(time.time() - t0) / 3600:.2f} h]")
@@ -820,7 +833,7 @@ for epoch in range(start_epoch, a.epochs):
             if floor_stop:
                 (a.out / "FLOOR_STOP").write_text(f"epoch {epoch + 1} step {gstep} checkpoint {ck.name}\n")
     else:
-        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + f"  [{(time.time() - t0) / 3600:.2f} h]")
+        log(f"epoch {epoch + 1}/{a.epochs}  train_mse={tr_mse:.5f} train_lpips={tr_lp:.4f}" + ts_diag() + (f" train_dino={run_dn / max(run_n, 1):.4f}" if dino is not None else "") + f"  [{(time.time() - t0) / 3600:.2f} h]")
     if ddp:
         dist.barrier()
     if floor_stop:
