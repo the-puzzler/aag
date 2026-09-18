@@ -472,9 +472,9 @@ opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.99), weight_d
 adv = a.gan_weight > 0
 fadv = a.fresh_gan_weight > 0
 disc = opt_d = fdisc = opt_fd = None
-if adv or fadv or ts is not None:
+if adv or fadv or ts is not None or cyc:
     from aag.discriminator import NLayerDiscriminator, paired_batch, paired_d_loss, paired_g_loss, adaptive_weight, hinge_d_loss, g_loss_from
-if ts is not None and not fadv:
+if (ts is not None or cyc) and not fadv:
     fresh_gen = torch.Generator(device=dev).manual_seed(8765 + rank)
 if adv:
     disc = NLayerDiscriminator(6, a.gan_ndf, a.gan_layers).to(dev)
