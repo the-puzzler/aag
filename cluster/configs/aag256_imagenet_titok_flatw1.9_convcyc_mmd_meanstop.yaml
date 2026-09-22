@@ -27,5 +27,5 @@ stages:
     ddp: true
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset imagenet256
-      --width 1.9 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 20 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.01 --eval-every 1 --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-stop-steps 500 --ts-stop-rule mean --inverse $R/imagenet_titok/inverse_conv_flatz/inverse.pt --cycle-floor-mult 1.0 --cycle-floor-pow 2 --cycle-aug 1 --cycle-weight-auto 0.25 --cycle-auto-steps 100
+      --width 1.9 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume auto:$RESUME --reset-schedule --epochs 20 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.01 --eval-every 1 --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-stop-steps 500 --ts-stop-rule mean --inverse $R/imagenet_titok/inverse_conv_flatz/inverse.pt --cycle-floor-mult 1.0 --cycle-floor-pow 2 --cycle-aug 1 --cycle-weight-auto 0.25 --cycle-auto-steps 100
       --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --out $R/imagenet_titok/gen_cls_conv_flatw1.9_convcyc_mmd_meanstop

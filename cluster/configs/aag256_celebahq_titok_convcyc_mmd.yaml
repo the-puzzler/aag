@@ -24,6 +24,6 @@ stages:
     ddp: true
     cmd: >-
       python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset celebahq256
-      --n-classes 0 --z-bottleneck 64 --width 1.4 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 440 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.02 --eval-every 2
+      --n-classes 0 --z-bottleneck 64 --width 1.4 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume auto:$RESUME --reset-schedule --epochs 440 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.02 --eval-every 2
       --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-fresh-mult 1 --inverse $R/celebahq_titok/inverse/inverse_conv_r64_aag159.pt --cycle-floor-mult 1.0 --cycle-floor-pow 2 --cycle-aug 1 --cycle-weight-auto 0.25 --cycle-auto-steps 100 
       --fid-stats $D/celebahq256/fid_stats_train_28000.npz --fid-n 10000 --log-every 100 --out $R/celebahq_titok/gen_uncond_200k_dino_gm4_convcyc_mmd

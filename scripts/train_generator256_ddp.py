@@ -74,7 +74,7 @@ ap.add_argument("--log-every", type=int, default=200)
 ap.add_argument("--compile", action="store_true")
 ap.add_argument("--no-amp", action="store_true")
 ap.add_argument("--decode-workers", type=int, default=0, help="0 = cpu_count // world_size")
-ap.add_argument("--resume", default=None, help="checkpoint path, or 'auto' = latest gen_ep*.pt under --out")
+ap.add_argument("--resume", default=None, help="checkpoint path; 'auto' = latest gen_ep*.pt under --out; 'auto:<path>' = latest under --out, else <path> (preemption-safe finetunes)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", type=Path, required=True)
 ap.add_argument("--vit-dim", type=int, default=768); ap.add_argument("--vit-depth", type=int, default=12); ap.add_argument("--vit-heads", type=int, default=12)
@@ -513,7 +513,14 @@ def lr_at(s):
     return a.lr * (a.min_lr_frac + (1 - a.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * min(1.0, p))))
 start_epoch, gstep = 0, 0
 curve = {"epoch": [], "train_mse": [], "train_lpips": [], "val_mse": [], "val_lpips": [], "fid": [], "fid_assigned": []}
-if a.resume == "auto":
+if a.resume and a.resume.startswith("auto:"):
+    # preemption-safe: latest checkpoint under --out if there is one, else the given base checkpoint.
+    # A pinned path alone restarts a preempted finetune from scratch (aag225 lost 112 epochs that way).
+    _fallback = a.resume[5:]
+    _cks = sorted((a.out / "checkpoints").glob("gen_ep*.pt")) if (a.out / "checkpoints").exists() else []
+    a.resume = str(_cks[-1]) if _cks else (_fallback or None)
+    log(f"--resume auto -> {a.resume or 'no checkpoint found, starting fresh'}" + (" (own progress)" if _cks else " (base)"))
+elif a.resume == "auto":
     # latest checkpoint under --out, or a fresh start if there is none: lets a
     # preempted/relaunched job continue without editing the config
     _cks = sorted((a.out / "checkpoints").glob("gen_ep*.pt")) if (a.out / "checkpoints").exists() else []
