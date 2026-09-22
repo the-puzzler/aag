@@ -122,6 +122,10 @@ ap.add_argument("--inverse", default="", help="INVERSE-CYCLE (user idea 2026-09-
                                                "adds ||E(G(z_fresh)) - target(z_fresh)||^2 (standardised) at fresh z -- pointwise off-anchor supervision with no external teacher")
 ap.add_argument("--cycle-weight", type=float, default=0.0, help="weight of the inverse-cycle term (adaptive gradient-balanced multiplier unless --cycle-fixed)")
 ap.add_argument("--cycle-fixed", action="store_true")
+ap.add_argument("--cycle-weight-auto", type=float, default=0.0, help=">0: CALIBRATE the weight once -- over the first --cycle-auto-steps steps measure the gradient-norm ratio "
+                                                                     "of the (hinged) cycle term to the supervised loss, then FREEZE w so the cycle push is this fraction of the supervised gradient. "
+                                                                     "Transfers across datasets, unlike a constant (the ratio is ~9x on CelebA and ~140x on ImageNet); overrides --cycle-weight")
+ap.add_argument("--cycle-auto-steps", type=int, default=100)
 ap.add_argument("--cycle-floor-mult", type=float, default=0.0, help=">0: FLOOR the cycle term at m x EMA(anchor cycle error): loss = relu(cyc_fresh - m*floor). "
                                                                        "Without it G exploits the frozen E (fresh error falls BELOW the anchor error while FID rises, aag209)")
 ap.add_argument("--cycle-floor-pow", type=float, default=1.0, help="hinge power on the floored excess: 1 = relu(excess) (gradient = FULL grad of cyc whenever excess>0, however tiny); "
@@ -325,11 +329,12 @@ dino = DinoFeatures().to(dev) if (a.dino_weight > 0 or a.ts_loss != "none" or a.
 inv = None
 if a.inverse:
     from aag.inverse import load_inverse
-    inv = load_inverse(a.inverse, dev)
-    log(f"inverse-cycle on: E from {a.inverse} (target={inv.kind}, dim {inv.mu.numel()}, val R2 {inv.r2_val}), weight {a.cycle_weight} ({'fixed' if a.cycle_fixed else 'adaptive'}); "
-        f"E frozen, gradient only through G at fresh z")
-cyc = inv is not None and a.cycle_weight > 0
-cyc_floor_ema = None
+    inv = load_inverse(a.inverse, dev, dino)
+    log(f"inverse-cycle on: E from {a.inverse} (encoder={inv.encoder}, target={inv.kind}, dim {inv.mu.numel()}, val R2 {inv.r2_val}), "
+        f"weight {'auto ' + str(a.cycle_weight_auto) + 'x grad(sup) over ' + str(a.cycle_auto_steps) + ' steps' if a.cycle_weight_auto > 0 else (str(a.cycle_weight) + (' fixed' if a.cycle_fixed else ' adaptive'))}"
+        f", floor {a.cycle_floor_mult}x anchor err, hinge^{a.cycle_floor_pow}, aug={bool(a.cycle_aug)}; E frozen, gradient only through G at fresh z")
+cyc = inv is not None and (a.cycle_weight > 0 or a.cycle_weight_auto > 0)
+cyc_floor_ema = None; cyc_w_frozen = None; cyc_w_acc = []
 def cyc_aug(x):
     if not a.cycle_aug: return x
     B, _, H, W = x.shape
@@ -762,12 +767,10 @@ for epoch in range(start_epoch, a.epochs):
             # INVERSE-CYCLE: E(G(z_fresh)) must return z_fresh's own target -> each fresh z keeps its location/identity
             nb_ = b.numel()
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                c_f, p_f = dino(cyc_aug(pred_f[:nb_]))
-            cyc_raw = inv.cycle_loss(c_f, p_f, zf[:nb_])
+                cyc_raw = inv.cycle_loss(cyc_aug(pred_f[:nb_]), zf[:nb_])
             if a.cycle_floor_mult > 0 or gstep % 20 == 0:
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                    c_a, p_a = dino(cyc_aug(pred.detach().clamp(-1, 1)))
-                    cyc_anchor = inv.cycle_loss(c_a, p_a, z[b])
+                    cyc_anchor = inv.cycle_loss(cyc_aug(pred.detach().clamp(-1, 1)), z[b])
             if a.cycle_floor_mult > 0:
                 # floor at the anchor error: "pointwise indistinguishable from anchors" = fresh error == anchor error, never below
                 ca = cyc_anchor.detach().clone()
@@ -777,7 +780,20 @@ for epoch in range(start_epoch, a.epochs):
                 if a.cycle_floor_pow != 1.0: cyc_loss = cyc_loss.pow(a.cycle_floor_pow)
             else:
                 cyc_loss = cyc_raw
-            wc = torch.tensor(a.cycle_weight, device=dev) if a.cycle_fixed else (adaptive_weight(loss, cyc_loss, raw.out.weight) * a.cycle_weight if cyc_loss.item() > 0 else torch.zeros((), device=dev))
+            if a.cycle_weight_auto > 0:
+                # calibrate once: w such that ||w * grad(cycle)|| = r * ||grad(supervised)||, then freeze
+                if cyc_w_frozen is None:
+                    if cyc_loss.item() > 0:
+                        cyc_w_acc.append(adaptive_weight(loss, cyc_loss, raw.out.weight).item())
+                    if len(cyc_w_acc) >= a.cycle_auto_steps:
+                        m = sorted(cyc_w_acc)[len(cyc_w_acc) // 2]                       # median: robust to the first steps' noise
+                        cyc_w_frozen = torch.tensor(m * a.cycle_weight_auto, device=dev)
+                        log(f"cycle weight calibrated: median grad ratio {m:.4g} x {a.cycle_weight_auto} -> w = {float(cyc_w_frozen):.4g} (frozen)")
+                    wc = torch.zeros((), device=dev) if not cyc_w_acc else torch.tensor(sorted(cyc_w_acc)[len(cyc_w_acc) // 2] * a.cycle_weight_auto, device=dev)
+                else:
+                    wc = cyc_w_frozen
+            else:
+                wc = torch.tensor(a.cycle_weight, device=dev) if a.cycle_fixed else (adaptive_weight(loss, cyc_loss, raw.out.weight) * a.cycle_weight if cyc_loss.item() > 0 else torch.zeros((), device=dev))
             total = total + wc * cyc_loss
         if fadv:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):

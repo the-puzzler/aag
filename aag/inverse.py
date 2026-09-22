@@ -48,16 +48,25 @@ class InverseHead(nn.Module):
 
 
 class InverseModel:
-    """Frozen E with its target definition. `target(z)` -> standardised target; `predict(cls, patch)` -> standardised prediction."""
+    """Frozen E with its target definition. `cycle_loss(x, z)` takes IMAGES: with the conv encoder E sees them
+    directly, with the DINO head they pass through the frozen backbone first."""
 
-    def __init__(self, ck: dict, dev):
+    def __init__(self, ck: dict, dev, dino=None):
+        self.encoder = ck.get("encoder", "dino")
         self.kind = ck["kind"]                                   # "z" or "code"
         self.W = ck["W"].to(dev) if ck.get("W") is not None else None
         self.b = ck["b"].to(dev) if ck.get("b") is not None else None
         self.mu, self.sd = ck["mu"].to(dev), ck["sd"].to(dev)
-        self.head = InverseHead(**ck["head_kwargs"]).to(dev)
-        self.head.load_state_dict(ck["head"]); self.head.eval()
-        for p in self.head.parameters():
+        if self.encoder == "conv":
+            from aag.inverse_conv import ConvInverse, conv_kwargs_from_ckpt
+            self.net = ConvInverse(**conv_kwargs_from_ckpt(ck)).to(dev)
+            self.dino = None
+        else:
+            self.net = InverseHead(**ck["head_kwargs"]).to(dev)
+            self.dino = dino
+            assert dino is not None, "the DINO-feature inverse needs the frozen backbone"
+        self.net.load_state_dict(ck["head"]); self.net.eval()
+        for p in self.net.parameters():
             p.requires_grad_(False)
         self.r2_val = ck.get("r2_val")
 
@@ -67,13 +76,16 @@ class InverseModel:
     def target(self, z: torch.Tensor) -> torch.Tensor:
         return (self.raw_target(z.float()) - self.mu) / self.sd
 
-    def predict(self, cls: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
-        return self.head(cls.float(), patch.float())
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        if self.encoder == "conv":
+            return self.net(x)
+        cls, patch = self.dino(x)
+        return self.net(cls.float(), patch.float())
 
-    def cycle_loss(self, cls, patch, z) -> torch.Tensor:
+    def cycle_loss(self, x, z) -> torch.Tensor:
         """mean squared error in standardised target space: 1.0 = constant predictor, 0 = perfect inversion"""
-        return F.mse_loss(self.predict(cls, patch), self.target(z))
+        return F.mse_loss(self.predict(x).float(), self.target(z))
 
 
-def load_inverse(path: str, dev) -> InverseModel:
-    return InverseModel(torch.load(path, map_location="cpu", weights_only=False), dev)
+def load_inverse(path: str, dev, dino=None) -> InverseModel:
+    return InverseModel(torch.load(path, map_location="cpu", weights_only=False), dev, dino)

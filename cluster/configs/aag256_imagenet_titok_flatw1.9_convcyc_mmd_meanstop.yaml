@@ -1,0 +1,31 @@
+# ImageNet w1.9 global MMD mean-stop + FROM-SCRATCH conv inverse-cycle; controls aag206 20.24, DINO-cycle aag221 24.44.
+# Encoding and the 300k-step hierarchy assignment run on the local box (user's call,
+# 2026-09-05); the assignment is uploaded to $R/imagenet/assign/ and this job waits for it.
+#   download -> wait for the assignment file -> FID stats -> 8-GPU generator.
+name: aag256_imagenet_titok_flatw1.9_convcyc_mmd_meanstop
+env:
+  AAG_HF_ROOT: /mnt/shared/aag/hf
+  HF_HOME: /mnt/shared/aag/hf_home
+  TORCH_HOME: /mnt/shared/aag/torch_hub
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  R: /mnt/shared/aag/results_scale256
+  D: /mnt/shared/aag/data
+  RESUME: /mnt/shared/aag/results_scale256/imagenet_titok/gen_cls_conv_flatw1.9_aag3k1floor/checkpoints/gen_ep016.pt
+  ASSIGN: /mnt/shared/aag/results_scale256/imagenet_titok/assign_aag3/assign_aag3_k1_floor_slim.pt
+stages:
+  - name: download
+    cmd: >-
+      mkdir -p $AAG_HF_ROOT $D/imagenet256 $R &&
+      python -c "from huggingface_hub import snapshot_download as s;
+      s('benjamin-paine/imagenet-1k-256x256', repo_type='dataset', local_dir='$AAG_HF_ROOT/imagenet-1k-256x256', allow_patterns=['data/*.parquet','README.md'], max_workers=16)" &&
+      df -h /mnt/shared
+  - name: fid_stats
+    cmd: python scripts/compute_fid_stats_hf256.py --dataset imagenet256 --n 0 --out $D/imagenet256/fid_stats_train_full.npz
+  - name: wait_assignment
+    cmd: python cluster/wait_for_file.py $ASSIGN --hours 12
+  - name: generator
+    ddp: true
+    cmd: >-
+      python scripts/train_generator256_ddp.py --assignment $ASSIGN --dataset imagenet256
+      --width 1.9 --n-res 2 --mse-weight 1.0 --lpips-weight 0.5 --dino-weight 0.02 --resume $RESUME --reset-schedule --epochs 20 --batch 32 --lr 5e-5 --min-lr-frac 1.0 --warmup 500 --val-frac 0.01 --eval-every 1 --ts-loss mmd --ts-weight 0.5 --ts-fixed --ts-features cls+patch --ts-stop-steps 500 --ts-stop-rule mean --inverse $R/imagenet_titok/inverse_conv_flatz/inverse.pt --cycle-floor-mult 1.0 --cycle-floor-pow 2 --cycle-aug 1 --cycle-weight-auto 0.25 --cycle-auto-steps 100
+      --fid-stats $D/imagenet256/fid_stats_train_full.npz --fid-n 10000 --log-every 200 --out $R/imagenet_titok/gen_cls_conv_flatw1.9_convcyc_mmd_meanstop

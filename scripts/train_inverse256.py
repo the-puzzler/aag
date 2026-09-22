@@ -27,6 +27,12 @@ ap.add_argument("--batch", type=int, default=64)
 ap.add_argument("--lr", type=float, default=3e-4)
 ap.add_argument("--wd", type=float, default=0.05)
 ap.add_argument("--val-frac", type=float, default=0.02)
+ap.add_argument("--encoder", choices=["dino", "conv"], default="conv", help="'conv': from-scratch mirror of the generator (default); 'dino': trained head on frozen DINOv2 tokens")
+ap.add_argument("--enc-width", type=float, default=1.0)
+ap.add_argument("--enc-res", type=int, default=2)
+ap.add_argument("--enc-head", choices=["pool", "grid"], default="pool")
+ap.add_argument("--enc-dropout", type=float, default=0.0)
+ap.add_argument("--ema", type=float, default=0.0, help=">0: evaluate and save an EMA of the encoder weights (e.g. 0.999)")
 ap.add_argument("--n-query", type=int, default=8)
 ap.add_argument("--depth", type=int, default=2)
 ap.add_argument("--aug", type=int, default=1)
@@ -78,15 +84,26 @@ g = torch.Generator().manual_seed(a.seed)
 val_mask_all = torch.zeros(N, dtype=torch.bool); val_mask_all[torch.randperm(N, generator=g)[: int(a.val_frac * N)]] = True
 val_mask = val_mask_all[lo:hi].to(dev); tr_idx = (~val_mask).nonzero(as_tuple=True)[0]; va_idx = val_mask.nonzero(as_tuple=True)[0]
 
-# frozen DINO + head
-dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14", verbose=False, trust_repo=True, skip_validation=True).eval().to(dev)
-for p in dino.parameters(): p.requires_grad_(False)
-mean = torch.tensor([0.485, 0.456, 0.406], device=dev).view(1, 3, 1, 1); std = torch.tensor([0.229, 0.224, 0.225], device=dev).view(1, 3, 1, 1)
-def feats(x):  # x in [-1,1], (B,3,H,W)
-    x = F.interpolate((x + 1) / 2, size=(224, 224), mode="bilinear", align_corners=False, antialias=True)
-    o = dino.forward_features((x - mean) / std); return o["x_norm_clstoken"], o["x_norm_patchtokens"]
-head_kwargs = dict(dim_tok=768, n_tok=257, n_query=a.n_query, out_dim=out_dim, depth=a.depth)
-head = InverseHead(**head_kwargs).to(dev)
+# encoder
+head_kwargs = conv_kwargs = None
+if a.encoder == "conv":
+    from aag.inverse_conv import ConvInverse
+    conv_kwargs = dict(out_dim=out_dim, width=a.enc_width, n_res=a.enc_res, head=a.enc_head, dropout=a.enc_dropout)
+    head = ConvInverse(**conv_kwargs).to(dev)
+    def predict(x): return head(x)
+else:
+    dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14", verbose=False, trust_repo=True, skip_validation=True).eval().to(dev)
+    for p in dino.parameters(): p.requires_grad_(False)
+    mean = torch.tensor([0.485, 0.456, 0.406], device=dev).view(1, 3, 1, 1); std = torch.tensor([0.229, 0.224, 0.225], device=dev).view(1, 3, 1, 1)
+    def feats(x):  # x in [-1,1], (B,3,H,W)
+        x = F.interpolate((x + 1) / 2, size=(224, 224), mode="bilinear", align_corners=False, antialias=True)
+        o = dino.forward_features((x - mean) / std); return o["x_norm_clstoken"], o["x_norm_patchtokens"]
+    head_kwargs = dict(dim_tok=768, n_tok=257, n_query=a.n_query, out_dim=out_dim, depth=a.depth)
+    head = InverseHead(**head_kwargs).to(dev)
+    def predict(x):
+        with torch.no_grad():
+            cls, pt = feats(x)
+        return head(cls.float(), pt.float())
 net = torch.nn.parallel.DistributedDataParallel(head, device_ids=[local]) if ddp else head
 opt = torch.optim.AdamW(head.parameters(), lr=a.lr, weight_decay=a.wd, betas=(0.9, 0.95))
 steps_per_epoch = tr_idx.numel() // a.batch
@@ -94,7 +111,13 @@ if ddp:
     m = torch.tensor([steps_per_epoch], device=dev); dist.all_reduce(m, op=dist.ReduceOp.MIN); steps_per_epoch = int(m.item())
 total_steps = steps_per_epoch * a.epochs; warm = min(500, total_steps // 10)
 sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warm) * 0.5 * (1 + torch.cos(torch.tensor(min(1.0, s / total_steps) * 3.14159265)).item()))
-log(f"head {sum(p.numel() for p in head.parameters()) / 1e6:.1f}M params, target {kind} dim {out_dim}, {steps_per_epoch} steps/epoch x {a.epochs}, batch {a.batch}x{world}, aug={bool(a.aug)}")
+ema_net = None
+if a.ema > 0:
+    import copy
+    ema_net = copy.deepcopy(head).eval()
+    for p_ in ema_net.parameters(): p_.requires_grad_(False)
+log(f"encoder={a.encoder} {sum(p.numel() for p in head.parameters()) / 1e6:.1f}M params, target {kind} dim {out_dim}, "
+    f"{steps_per_epoch} steps/epoch x {a.epochs}, batch {a.batch}x{world}, aug={bool(a.aug)}, ema={a.ema}")
 
 def augment(x):
     if not a.aug: return x
@@ -113,35 +136,46 @@ def evaluate():
     for i in range(0, va_idx.numel(), a.batch):
         idx = va_idx[i:i + a.batch]; x = to_float(x_u8[idx])
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            cls, pt = feats(x); pred = head(cls.float(), pt.float())
+            pred = (ema_net(x) if a.encoder == "conv" else predict(x)) if ema_net is not None else predict(x)
         d = (pred.float() - target(z[idx])).pow(2); se += d.sum(); n += d.numel(); per_dim += d.sum(0)
     if ddp:
         dist.all_reduce(se); dist.all_reduce(n); dist.all_reduce(per_dim)
     head.train(); mse = (se / n).item(); pd = per_dim / (n / out_dim)
     return mse, pd
 
-gstep = 0; hist = []
+gstep = 0; hist = []; best_mse = float("inf")
 for ep in range(a.epochs):
     head.train(); perm = tr_idx[torch.randperm(tr_idx.numel(), device=dev)]; run = 0.0; rn = 0; t0 = time.time()
     for s in range(steps_per_epoch):
         idx = perm[s * a.batch:(s + 1) * a.batch]; x = augment(to_float(x_u8[idx]))
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            cls, pt = feats(x)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            pred = net(cls.float(), pt.float())
+            if a.encoder == "conv":
+                pred = net(x)
+            else:
+                with torch.no_grad():
+                    cls, pt = feats(x)
+                pred = net(cls.float(), pt.float())
         loss = F.mse_loss(pred.float(), target(z[idx]))
         opt.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0); opt.step(); sched.step(); gstep += 1
         run += loss.item(); rn += 1
+        if ema_net is not None:
+            with torch.no_grad():
+                for pe, pm in zip(ema_net.parameters(), head.parameters()): pe.lerp_(pm, 1 - a.ema)
+                for be, bm in zip(ema_net.buffers(), head.buffers()): be.copy_(bm)
         if gstep % a.log_every == 0:
             log(f"  ep {ep + 1} step {s + 1}/{steps_per_epoch}  mse {run / rn:.4f}  lr {sched.get_last_lr()[0]:.2e}  {(s + 1) * a.batch * world / (time.time() - t0):.0f} img/s")
     mse, pd = evaluate()
     hist.append({"epoch": ep + 1, "train_mse": run / max(rn, 1), "val_mse": mse, "val_r2": 1 - mse})
     log(f"epoch {ep + 1}/{a.epochs}  train_mse={run / max(rn, 1):.4f}  val_mse={mse:.4f}  val_R2={1 - mse:.4f}  "
         f"per-dim R2 min/median/max {1 - pd.max().item():.3f}/{1 - pd.median().item():.3f}/{1 - pd.min().item():.3f}  [{(time.time() - t0) / 60:.1f} min]")
-    if is_main:
-        torch.save({"head": head.state_dict(), "head_kwargs": head_kwargs, "kind": kind, "W": W0, "b": b0, "mu": mu.cpu(), "sd": sd_.cpu(),
+    if is_main and mse <= best_mse:                      # the FILE must hold the best weights, not the last epoch's
+        best_mse = mse
+        torch.save({"head": (ema_net if ema_net is not None else head).state_dict(), "head_kwargs": head_kwargs,
+                    "conv_kwargs": conv_kwargs, "encoder": a.encoder, "kind": kind, "W": W0, "b": b0, "mu": mu.cpu(), "sd": sd_.cpu(),
                     "r2_val": 1 - mse, "per_dim_r2": (1 - pd).cpu(), "assignment": a.assignment, "base_ckpt": a.base_ckpt, "args": vars(a), "hist": hist},
                    os.path.join(a.out, "inverse.pt"))
+        log(f"  saved (best so far, val_mse {mse:.4f}, R2 {1 - mse:.4f})")
+    if is_main:
         json.dump(hist, open(os.path.join(a.out, "curve.json"), "w"))
 if ddp: dist.barrier()
 log("done")
